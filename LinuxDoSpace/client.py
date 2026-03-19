@@ -421,7 +421,7 @@ class Client:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/x-ndjson",
-                "User-Agent": "LinuxDoSpace Python SDK/0.3.0a1",
+                "User-Agent": "LinuxDoSpace Python SDK/0.3.0a2",
             },
             method="GET",
         )
