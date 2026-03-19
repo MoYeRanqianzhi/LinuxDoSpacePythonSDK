@@ -2,6 +2,11 @@
 
 This file is the complete public SDK reference for `sdk/python`.
 
+Install/import naming:
+
+- PyPI install name: `linuxdospace`
+- Import package name: `LinuxDoSpace`
+
 ## Paths
 
 - Package root: `../../../LinuxDoSpace`

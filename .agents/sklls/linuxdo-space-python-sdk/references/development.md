@@ -24,6 +24,33 @@ What they validate:
 - integration-style behavior in `tests/test_sdk.py`
 - packaging and editable install correctness from `pyproject.toml`
 
+## PyPI Release
+
+GitHub workflow file:
+
+- `.github/workflows/pypi-release.yml`
+
+Release trigger:
+
+- push tag `v<package-version>`
+- example for current version `0.3.0a1`: `v0.3.0a1`
+
+Workflow behavior:
+
+- reads version from `pyproject.toml`
+- rejects tag pushes whose tag does not match that version
+- builds both sdist and wheel
+- runs `twine check`
+- publishes through PyPI Trusted Publishing
+
+PyPI Trusted Publishing fields to configure on PyPI:
+
+- owner: `MoYeRanqianzhi`
+- repository name: `LinuxDoSpacePythonSDK`
+- workflow name: `pypi-release.yml`
+- environment name: `pypi`
+- project name: `LinuxDoSpace`
+
 ## Files to Update Together
 
 When public behavior changes, keep these files aligned:

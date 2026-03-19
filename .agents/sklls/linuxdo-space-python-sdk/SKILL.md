@@ -1,21 +1,23 @@
 ---
 name: linuxdo-space-python-sdk
-description: Use when implementing, fixing, refactoring, testing, or documenting the LinuxDoSpace Python SDK under `sdk/python`, or when writing code that consumes `from LinuxDoSpace import Client, Suffix`. Covers the SDK API surface, mailbox binding lifecycle, routing semantics, stream behavior, validation commands, and the required docs/tests update points.
+description: Use when writing or fixing Python code that consumes the LinuxDoSpace SDK, especially after `pip install linuxdospace`, for `from LinuxDoSpace import Client, Suffix`, mail streaming, mailbox bindings, regex matching, overlap control, routing, and exception handling. Also use when maintaining the SDK itself under `sdk/python`.
 ---
 
 # LinuxDoSpace Python SDK
 
+Read [references/consumer.md](references/consumer.md) first for normal SDK usage.
 Read [references/api.md](references/api.md) before changing any public behavior.
-Read [references/development.md](references/development.md) before editing code, tests, or README.
-Read [references/examples.md](references/examples.md) when you need task-shaped templates for common SDK changes.
+Read [references/examples.md](references/examples.md) when you need task-shaped templates.
+Read [references/development.md](references/development.md) only when editing the SDK itself.
 
 ## Workflow
 
-1. Work in `../../../` unless the task explicitly targets this skill itself.
-2. Treat `../../../LinuxDoSpace/__init__.py` as the public export contract.
-3. Treat `../../../README.md` and `../../../tests/test_sdk.py` as part of the public API. If behavior changes, update both in the same change.
-4. Prefer explicit examples with `client.mail.bind(...)`. Only use `client.mail(...)` when intentionally documenting syntax sugar.
-5. Preserve these invariants:
+1. For consumer code, prefer the public package only:
+   - install from PyPI with `python -m pip install linuxdospace`
+   - import only from `LinuxDoSpace`
+2. For local repository work, the SDK root is `../../../`.
+3. Prefer explicit examples with `client.mail.bind(...)`. Only use `client.mail(...)` when intentionally documenting syntax sugar.
+4. Preserve these user-facing invariants:
    - one `Client` owns one upstream HTTPS stream
    - remote `base_url` must use `https://`; only localhost may use `http://`
    - `client.listen(...)` is the canonical full-intake interface
@@ -27,7 +29,8 @@ Read [references/examples.md](references/examples.md) when you need task-shaped 
    - one `MailBox` allows only one active listener
    - `bind_many(...)` is transactional: partial success must roll back
    - `client.mail.route(message)` matches only `message.address` and reports current local matches, not historical queue delivery
-6. If you add a public API, implement code, tests, and README changes together.
+5. If you edit the SDK itself, treat `../../../LinuxDoSpace/__init__.py` as the public export contract.
+6. If behavior changes, update `../../../README.md` and `../../../tests/test_sdk.py` in the same change.
 7. Validate in `../../../` after SDK changes:
 
 ```bash
@@ -37,11 +40,11 @@ python -m pip install -e .
 
 ## Common Tasks
 
-- Add or change API: read `references/api.md`, edit `../../../LinuxDoSpace/*.py`, update `../../../README.md`, update `../../../tests/test_sdk.py`, run both validation commands.
-- Fix lifecycle, queue, or ordering bugs: inspect `../../../LinuxDoSpace/client.py` and the integration tests first; do not infer semantics from README alone.
-- Add examples: keep them aligned with the preferred explicit API and current lifecycle semantics.
+- Write consumer code: start with `references/consumer.md`.
+- Check exact signatures and semantics: read `references/api.md`.
+- Diagnose failures in consumer code: prefer `AuthenticationError`, then `StreamError`, then generic `LinuxDoSpaceError`.
+- Add or change SDK API: read `references/development.md`, then update code, tests, and README together.
 - Use ready-made task templates: read `references/examples.md`.
-- Diagnose failures: prefer `AuthenticationError`, then `StreamError`, then generic `LinuxDoSpaceError` handling.
 
 ## Do Not Regress
 

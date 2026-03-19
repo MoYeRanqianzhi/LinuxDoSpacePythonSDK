@@ -3,7 +3,39 @@
 Use this file when you already understand the API surface and need a fast path
 for common SDK work.
 
-## 1. Add or Change a Public API
+## 1. Write Consumer Code Against the SDK
+
+Use this for normal application development that depends on the package.
+
+Checklist:
+
+1. Prefer `pip install linuxdospace`.
+2. Import only from `LinuxDoSpace`.
+3. Choose one of:
+   - `client.listen(...)` for full-token intake
+   - `client.mail.bind(...)` for explicit mailbox consumption
+   - `client.mail.bind_many(...)` for ordered batch setup
+4. Catch `AuthenticationError`, `StreamError`, then `LinuxDoSpaceError`.
+
+Starter:
+
+```python
+from LinuxDoSpace import AuthenticationError, Client, LinuxDoSpaceError, StreamError, Suffix
+
+try:
+    with Client(token="...") as client:
+        with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            for item in mailbox.listen(timeout=60):
+                print(item.subject)
+except AuthenticationError:
+    ...
+except StreamError:
+    ...
+except LinuxDoSpaceError:
+    ...
+```
+
+## 2. Add or Change a Public API
 
 Use this when changing constructor args, public methods, public exports, public
 dataclasses, or documented semantics.
@@ -29,7 +61,7 @@ Typical patch set:
 - `../../../tests/test_sdk.py`
 - `../../../README.md`
 
-## 2. Fix Lifecycle or Queue Bugs
+## 3. Fix Lifecycle or Queue Bugs
 
 Use this for:
 
@@ -61,7 +93,7 @@ def test_client_close_closes_registered_mailboxes(self) -> None:
     self.assertTrue(mailbox.closed)
 ```
 
-## 3. Add a New `Suffix`
+## 4. Add a New `Suffix`
 
 Use this when supporting another managed email suffix.
 
@@ -81,7 +113,7 @@ class Suffix(str, Enum):
 
 Do not add a suffix only in README. Keep enum, tests, and docs aligned.
 
-## 4. Add a New Exception Type
+## 5. Add a New Exception Type
 
 Use this only when callers need to branch on a new error category. Do not add
 exception types for internal convenience only.
@@ -94,7 +126,7 @@ Checklist:
 4. Add tests that assert the public exception type.
 5. Update README exception-handling examples if relevant.
 
-## 5. Add a New Typed Field to `MailMessage`
+## 6. Add a New Typed Field to `MailMessage`
 
 Use this when exposing more parsed mail metadata.
 
@@ -107,7 +139,7 @@ Checklist:
 
 Never add a field to the dataclass without wiring it into the parser path.
 
-## 6. Add or Change a README Example
+## 7. Add or Change a README Example
 
 Prefer these examples:
 
@@ -146,7 +178,7 @@ Rules:
 - Do not imply hidden buffering before `listen()` starts.
 - Do not call sequential consumption “parallel”.
 
-## 7. Add a Regression Test for Matching Order
+## 8. Add a Regression Test for Matching Order
 
 Use when exact/pattern ordering or `allow_overlap` changes.
 
@@ -167,7 +199,7 @@ second = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
 self.assertEqual(client.mail.route(message), (first, second))
 ```
 
-## 8. Add Consumer-Facing Example Code Outside the SDK
+## 9. Add Consumer-Facing Example Code Outside the SDK
 
 Use this when another module or example project needs to consume the SDK.
 
@@ -196,7 +228,7 @@ except LinuxDoSpaceError:
     ...
 ```
 
-## 9. Review Checklist Before Finishing
+## 10. Review Checklist Before Finishing
 
 - Did you change public behavior without updating `tests/test_sdk.py`?
 - Did you update README for user-visible semantics?
