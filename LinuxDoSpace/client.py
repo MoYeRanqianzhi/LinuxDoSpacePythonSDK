@@ -185,6 +185,16 @@ class Client:
         self._initial_connect_error: LinuxDoSpaceError | None = None
         self._fatal_error: LinuxDoSpaceError | None = None
 
+        # `client.mail` is a callable facade object instead of a plain method.
+        # This gives the SDK two intentionally different user-facing styles:
+        #
+        # - explicit registration: `client.mail.bind(...)`
+        # - convenience sugar: `client.mail(...)`
+        #
+        # Both styles build the exact same `MailBox` object and therefore share
+        # the same local ordered matching semantics.
+        self.mail: MailBindingFacade = MailBindingFacade(self)
+
         self._reader_thread = threading.Thread(
             target=self._run_stream_loop,
             name="LinuxDoSpaceClientStream",
@@ -243,7 +253,7 @@ class Client:
         finally:
             unregister()
 
-    def mail(
+    def _build_mailbox(
         self,
         *,
         prefix: str | None = None,
@@ -301,9 +311,14 @@ class Client:
         suffix: Suffix | str,
         allow_overlap: bool = False,
     ) -> "MailBox":
-        """Create one catch-all helper based on regex mailbox matching."""
+        """Create one catch-all helper based on regex mailbox matching.
 
-        return self.mail(pattern=pattern, suffix=suffix, allow_overlap=allow_overlap)
+        This method remains available as a short top-level helper, but the
+        preferred explicit-registration style is now
+        `client.mail.catch_all(...)` or `client.mail.bind(pattern=...)`.
+        """
+
+        return self.mail.catch_all(pattern=pattern, suffix=suffix, allow_overlap=allow_overlap)
 
     def _run_stream_loop(self) -> None:
         """Keep the shared HTTPS stream alive in the background."""
@@ -615,6 +630,78 @@ class MailBox:
             yield from self._client._iterate_queue(listener_queue, timeout=timeout)
         finally:
             unregister()
+
+
+class MailBindingFacade:
+    """Callable mailbox-registration facade exposed as `client.mail`.
+
+    The facade exists to make the API shape explicit:
+
+    - `client.mail.bind(...)` is the primary, explicit registration form
+    - `client.mail(...)` is only syntactic sugar over `bind(...)`
+
+    Both forms intentionally return the same `MailBox` object so that `with`
+    remains a natural context-managed convenience layer on top of explicit
+    mailbox registration.
+    """
+
+    def __init__(self, client: Client) -> None:
+        """Bind the facade to exactly one shared `Client` instance."""
+
+        self._client = client
+
+    def bind(
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | re.Pattern[str] | None = None,
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> MailBox:
+        """Register one mailbox binding explicitly.
+
+        This is the preferred public API because it makes mailbox registration
+        visually distinct from the later `listen(...)` step.
+        """
+
+        return self._client._build_mailbox(
+            prefix=prefix,
+            pattern=pattern,
+            suffix=suffix,
+            allow_overlap=allow_overlap,
+        )
+
+    def __call__(
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | re.Pattern[str] | None = None,
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> MailBox:
+        """Return the same mailbox binding as `bind(...)`.
+
+        This keeps `client.mail(...)` and `with client.mail(...)` working as
+        syntactic sugar without introducing a second code path.
+        """
+
+        return self.bind(
+            prefix=prefix,
+            pattern=pattern,
+            suffix=suffix,
+            allow_overlap=allow_overlap,
+        )
+
+    def catch_all(
+        self,
+        *,
+        pattern: str | re.Pattern[str] = r".*",
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> MailBox:
+        """Build one regex-based catch-all mailbox helper explicitly."""
+
+        return self.bind(pattern=pattern, suffix=suffix, allow_overlap=allow_overlap)
 
 
 def _decode_stream_event(raw_line: bytes) -> _StreamEvent:

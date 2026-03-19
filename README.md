@@ -30,13 +30,30 @@ with Client(token="你的 API Token") as client:
         print(item.text)
 ```
 
-也可以继续使用更方便的单邮箱监听：
+更推荐使用显式注册接口：
 
 ```python
 from LinuxDoSpace import Client, Suffix
 
 with Client(token="你的 API Token") as client:
-    with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mail:
+    mail = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+    try:
+        for item in mail.listen(timeout=60):
+            print(item.address)
+            print(item.sender)
+            print(item.subject)
+            print(item.text)
+    finally:
+        mail.close()
+```
+
+如果你更喜欢 `with`，它只是上面显式注册写法的语法糖：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mail:
         for item in mail.listen(timeout=60):
             print(item.address)
             print(item.sender)
@@ -50,8 +67,8 @@ with Client(token="你的 API Token") as client:
 from LinuxDoSpace import Client, Suffix
 
 with Client(token="你的 API Token") as client:
-    with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
-        with client.mail(prefix="bob", suffix=Suffix.linuxdo_space) as bob:
+    with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
+        with client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space) as bob:
             for item in alice.listen(timeout=60):
                 print("alice", item.subject)
             for item in bob.listen(timeout=60):
@@ -64,10 +81,12 @@ with Client(token="你的 API Token") as client:
 from LinuxDoSpace import Client, Suffix
 
 with Client(token="你的 API Token") as client:
-    with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as catch_all:
+    with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as catch_all:
         for item in catch_all.listen(timeout=60):
             print(item.address, item.subject)
 ```
+
+如果你确实想保留旧的简写风格，`client.mail(...)` 仍然可用，但它只是 `client.mail.bind(...)` 的同义写法。
 
 ## 设计说明
 
@@ -75,8 +94,9 @@ with Client(token="你的 API Token") as client:
 - 一个 `Client` 始终只维护一条到 `/v1/token/email/stream` 的真实连接
 - `Client` 会统一接收、统一解析、统一分发收到的所有邮件事件
 - `client.listen(timeout=-1)` 是最核心的“全量接收”接口
-- `client.mail(prefix=..., suffix=...).listen(...)` 是精确邮箱绑定
-- `client.mail(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
+- `client.mail.bind(prefix=..., suffix=...).listen(...)` 是精确邮箱绑定
+- `client.mail.bind(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
+- `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
 - `Suffix` 是一个专门的枚举类型，避免把后缀写成普通字符串
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
 - 如果 `timeout` 为正数，则表示本次监听的最长总时长（秒）
@@ -87,8 +107,8 @@ with Client(token="你的 API Token") as client:
 - 服务端只知道一个 Token 对应一个客户端连接
 - 服务端不会知道客户端内部绑定了哪些邮箱
 - 客户端内部会根据邮件中的收件地址，在本地内存里完成筛选和分发
-- 因此多个 `mail()` 绑定不会增加服务端的上游连接数
-- 单个 `mail()` 只是方便函数，底层依赖的是 `Client` 级全量接收
+- 因此多个 `mail.bind()` 绑定不会增加服务端的上游连接数
+- 单个 `mail.bind()` 只是方便函数，底层依赖的是 `Client` 级全量接收
 
 ## 匹配规则
 

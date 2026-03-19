@@ -99,7 +99,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         results: "queue.Queue[tuple[str, str]]" = queue.Queue()
 
         def _listen(prefix: str) -> None:
-            with client.mail(prefix=prefix, suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(prefix=prefix, suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     results.put((prefix, message.subject))
                     break
@@ -153,7 +153,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
                 all_subjects.append(message.subject)
 
         def _listen_alice() -> None:
-            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     alice_subjects.append(message.subject)
 
@@ -196,12 +196,12 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         exact_subjects: list[str] = []
 
         def _listen_pattern() -> None:
-            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     pattern_subjects.append(message.subject)
 
         def _listen_exact() -> None:
-            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     exact_subjects.append(message.subject)
 
@@ -242,17 +242,17 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         third_subjects: list[str] = []
 
         def _listen_first() -> None:
-            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     first_subjects.append(message.subject)
 
         def _listen_second() -> None:
-            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     second_subjects.append(message.subject)
 
         def _listen_third() -> None:
-            with client.mail(pattern=r"a.*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+            with client.mail.bind(pattern=r"a.*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     third_subjects.append(message.subject)
 
@@ -297,17 +297,17 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         third_subjects: list[str] = []
 
         def _listen_first() -> None:
-            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     first_subjects.append(message.subject)
 
         def _listen_second() -> None:
-            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     second_subjects.append(message.subject)
 
         def _listen_third() -> None:
-            with client.mail(pattern=re.compile(r".*e"), suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+            with client.mail.bind(pattern=re.compile(r".*e"), suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     third_subjects.append(message.subject)
 
@@ -350,7 +350,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         received_subjects: list[str] = []
 
         def _consume() -> None:
-            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.5):
                     received_subjects.append(message.subject)
 
@@ -370,6 +370,50 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(received_subjects[0], "Burst 0")
         self.assertEqual(received_subjects[-1], "Burst 49")
         self.assertEqual(server.request_count, 1)
+
+    def test_mail_call_remains_sugar_over_explicit_bind(self) -> None:
+        """`client.mail(...)` should behave exactly like the explicit `bind(...)` form."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        explicit_subjects: list[str] = []
+        sugar_subjects: list[str] = []
+
+        def _listen_explicit() -> None:
+            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    explicit_subjects.append(message.subject)
+
+        def _listen_sugar() -> None:
+            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    sugar_subjects.append(message.subject)
+
+        explicit_listener = threading.Thread(target=_listen_explicit)
+        sugar_listener = threading.Thread(target=_listen_sugar)
+        explicit_listener.start()
+        time.sleep(0.05)
+        sugar_listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "Sugar Match", "alice body"),
+        )
+
+        explicit_listener.join(timeout=2.0)
+        sugar_listener.join(timeout=2.0)
+
+        self.assertEqual(explicit_subjects, ["Sugar Match"])
+        self.assertEqual(sugar_subjects, ["Sugar Match"])
 
 
 class _StreamingRequestHandler(BaseHTTPRequestHandler):
