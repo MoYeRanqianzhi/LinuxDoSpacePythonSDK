@@ -4,6 +4,7 @@ This file is the complete public SDK reference for `sdk/python`.
 
 Install/import naming:
 
+- Current PyPI install command: `pip install linuxdospace`
 - PyPI install name: `linuxdospace`
 - Import package name: `LinuxDoSpace`
 

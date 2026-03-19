@@ -10,7 +10,13 @@
 
 ## 安装
 
-优先使用 PyPI 安装：
+当前 PyPI 安装命令是：
+
+```bash
+pip install linuxdospace
+```
+
+如果你更习惯显式调用当前 Python 解释器，也可以使用：
 
 ```bash
 python -m pip install linuxdospace

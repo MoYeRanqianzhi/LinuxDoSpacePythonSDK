@@ -1,6 +1,6 @@
 ---
 name: linuxdo-space-python-sdk
-description: Use when writing or fixing Python code that consumes the LinuxDoSpace SDK, especially after `pip install linuxdospace`, for `from LinuxDoSpace import Client, Suffix`, mail streaming, mailbox bindings, regex matching, overlap control, routing, and exception handling. Also use when maintaining the SDK itself under `sdk/python`.
+description: Use when writing or fixing Python code that consumes the LinuxDoSpace SDK, especially after the current PyPI install command `pip install linuxdospace`, for `from LinuxDoSpace import Client, Suffix`, mail streaming, mailbox bindings, regex matching, overlap control, routing, and exception handling. Also use when maintaining the SDK itself under `sdk/python`.
 ---
 
 # LinuxDoSpace Python SDK
@@ -13,7 +13,8 @@ Read [references/development.md](references/development.md) only when editing th
 ## Workflow
 
 1. For consumer code, prefer the public package only:
-   - install from PyPI with `python -m pip install linuxdospace`
+   - the current PyPI install command is `pip install linuxdospace`
+   - `python -m pip install linuxdospace` is also acceptable when the environment requires an explicit interpreter
    - import only from `LinuxDoSpace`
 2. For local repository work, the SDK root is `../../../`.
 3. Prefer explicit examples with `client.mail.bind(...)`. Only use `client.mail(...)` when intentionally documenting syntax sugar.

@@ -5,7 +5,13 @@ modifying the SDK itself.
 
 ## Install
 
-Preferred package install:
+Current PyPI install command:
+
+```bash
+pip install linuxdospace
+```
+
+Equivalent explicit-interpreter form:
 
 ```bash
 python -m pip install linuxdospace
