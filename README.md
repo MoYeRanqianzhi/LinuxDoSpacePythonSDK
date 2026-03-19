@@ -73,3 +73,4 @@ with client.mail("alice", Suffix.linuxdo_space) as mail:
 - API Token 明文只会在创建时返回一次，请妥善保存
 - Token 目标只有在客户端实际建立 HTTPS 流连接时才会收到邮件事件
 - 如果服务端发现当前没有连接，邮件事件会被直接丢弃，不会排队补发
+- SDK 默认要求远程后端使用 `https://`；只有 `localhost` / `127.0.0.1` / `::1` 这类本地调试地址允许使用 `http://`

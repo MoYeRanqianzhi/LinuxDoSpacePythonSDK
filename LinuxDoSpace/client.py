@@ -13,6 +13,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from email.parser import BytesParser
@@ -31,6 +32,7 @@ _STREAM_PATH = "/v1/token/email/stream"
 _READY_EVENT_TYPE = "ready"
 _HEARTBEAT_EVENT_TYPE = "heartbeat"
 _MAIL_EVENT_TYPE = "mail"
+_LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1"}
 
 
 @dataclass(slots=True)
@@ -67,7 +69,7 @@ class Client:
         _urlopen: Callable[..., Any] | None = None,
     ) -> None:
         self._token = token.strip()
-        self._base_url = base_url.rstrip("/")
+        self._base_url = _normalize_base_url(base_url)
         self._connect_timeout = float(connect_timeout)
         self._stream_socket_timeout = float(stream_socket_timeout)
         self._urlopen = _urlopen or urllib.request.urlopen
@@ -176,10 +178,11 @@ class MailBox:
         )
 
         try:
-            with self._client._urlopen(request, timeout=socket_timeout) as response:
+            with self._client._urlopen(request, timeout=self._client._connect_timeout) as response:
                 status_code = getattr(response, "status", 200)
                 if status_code != 200:
                     raise StreamError(f"unexpected stream status code: {status_code}")
+                _set_stream_response_timeout(response, socket_timeout)
 
                 while not self._closed:
                     if deadline is not None and time.monotonic() >= deadline:
@@ -365,3 +368,48 @@ def _extract_message_bodies(message: Any) -> tuple[str, str]:
             text_parts.append(payload_text)
 
     return "\n".join(text_parts).strip(), "\n".join(html_parts).strip()
+
+
+def _normalize_base_url(raw_base_url: str) -> str:
+    """Validate and normalize the backend base URL."""
+
+    normalized_value = raw_base_url.strip().rstrip("/")
+    if not normalized_value:
+        raise ValueError("base_url must not be empty")
+
+    parsed_url = urllib.parse.urlparse(normalized_value)
+    if parsed_url.scheme not in {"https", "http"}:
+        raise ValueError("base_url must use http or https")
+    if not parsed_url.netloc:
+        raise ValueError("base_url must include a host")
+
+    hostname = (parsed_url.hostname or "").strip().lower()
+    if parsed_url.scheme != "https" and hostname not in _LOCALHOST_NAMES and not hostname.endswith(".localhost"):
+        raise ValueError("non-local base_url must use https")
+
+    return normalized_value
+
+
+def _set_stream_response_timeout(response: Any, timeout_seconds: float) -> None:
+    """Best-effort read-timeout adjustment after the HTTPS connection is open."""
+
+    candidate_paths = (
+        ("fp", "raw", "_sock"),
+        ("fp", "raw", "_fp", "fp", "raw", "_sock"),
+    )
+
+    for candidate_path in candidate_paths:
+        current_object = response
+        for attribute_name in candidate_path:
+            current_object = getattr(current_object, attribute_name, None)
+            if current_object is None:
+                break
+        if current_object is None:
+            continue
+        settimeout = getattr(current_object, "settimeout", None)
+        if callable(settimeout):
+            try:
+                settimeout(timeout_seconds)
+            except OSError:
+                return
+            return
