@@ -10,7 +10,13 @@
 
 ## 安装
 
-当前建议直接以子项目方式使用：
+优先使用 PyPI 安装：
+
+```bash
+python -m pip install linuxdospace
+```
+
+如果你在当前仓库里本地开发 SDK，再使用可编辑安装：
 
 ```bash
 cd sdk/python

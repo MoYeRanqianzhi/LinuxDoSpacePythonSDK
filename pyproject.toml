@@ -9,9 +9,10 @@ description = "LinuxDoSpace Python SDK for HTTPS mail streaming"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "LinuxDoSpace" }
+  { name = "MoYeRanQianZhi" }
 ]
 license = "MIT"
+urls = { Homepage = "https://github.com/MoYeRanqianzhi/LinuxDoSpacePythonSDK", Repository = "https://github.com/MoYeRanqianzhi/LinuxDoSpacePythonSDK", Issues = "https://github.com/MoYeRanqianzhi/LinuxDoSpacePythonSDK/issues" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
