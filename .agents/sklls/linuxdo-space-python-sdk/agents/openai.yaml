@@ -1,0 +1,4 @@
+interface:
+  display_name: "LinuxDoSpace Python SDK"
+  short_description: "Implement and maintain the LinuxDoSpace Python mail SDK"
+  default_prompt: "Use $linuxdo-space-python-sdk to implement or update the LinuxDoSpace Python SDK in sdk/python with matching tests and docs."
