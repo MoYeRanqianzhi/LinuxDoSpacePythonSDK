@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 
 from LinuxDoSpace import Client, LinuxDoSpaceError, Suffix
 from LinuxDoSpace.models import MailMessage
@@ -64,7 +65,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         listener = threading.Thread(target=_consume)
         listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="full listener registration")
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -100,17 +101,27 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.addCleanup(client.close)
 
         results: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        mailboxes = {
+            prefix: client.mail.bind(prefix=prefix, suffix=Suffix.linuxdo_space)
+            for prefix in ("alice", "bob", "carol")
+        }
+        for mailbox in mailboxes.values():
+            self.addCleanup(mailbox.close)
 
         def _listen(prefix: str) -> None:
-            with client.mail.bind(prefix=prefix, suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    results.put((prefix, message.subject))
-                    break
+            mailbox = mailboxes[prefix]
+            for message in mailbox.listen(timeout=0.4):
+                results.put((prefix, message.subject))
+                break
 
         listeners = [threading.Thread(target=_listen, args=(prefix,)) for prefix in ("alice", "bob", "carol")]
         for listener in listeners:
             listener.start()
-        time.sleep(0.05)
+        _wait_for(
+            lambda: all(mailbox._is_listening for mailbox in mailboxes.values()),
+            timeout=2.0,
+            description="parallel mailbox listeners",
+        )
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -260,21 +271,23 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         all_subjects: list[str] = []
         alice_subjects: list[str] = []
+        alice_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(alice_mailbox.close)
 
         def _listen_all() -> None:
             for message in client.listen(timeout=0.4):
                 all_subjects.append(message.subject)
 
         def _listen_alice() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    alice_subjects.append(message.subject)
+            for message in alice_mailbox.listen(timeout=0.4):
+                alice_subjects.append(message.subject)
 
         all_listener = threading.Thread(target=_listen_all)
         alice_listener = threading.Thread(target=_listen_alice)
         all_listener.start()
         alice_listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="shared full listener registration")
+        _wait_for(lambda: alice_mailbox._is_listening, timeout=2.0, description="alice mailbox listener")
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -307,23 +320,25 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         pattern_subjects: list[str] = []
         exact_subjects: list[str] = []
+        pattern_mailbox = client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space)
+        exact_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(pattern_mailbox.close)
+        self.addCleanup(exact_mailbox.close)
 
         def _listen_pattern() -> None:
-            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    pattern_subjects.append(message.subject)
+            for message in pattern_mailbox.listen(timeout=0.4):
+                pattern_subjects.append(message.subject)
 
         def _listen_exact() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    exact_subjects.append(message.subject)
+            for message in exact_mailbox.listen(timeout=0.4):
+                exact_subjects.append(message.subject)
 
         pattern_listener = threading.Thread(target=_listen_pattern)
         exact_listener = threading.Thread(target=_listen_exact)
         pattern_listener.start()
-        time.sleep(0.05)
         exact_listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: pattern_mailbox._is_listening, timeout=2.0, description="pattern mailbox listener")
+        _wait_for(lambda: exact_mailbox._is_listening, timeout=2.0, description="exact mailbox listener")
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -363,7 +378,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         listener = threading.Thread(target=_consume)
         listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="route helper full listener registration")
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -416,31 +431,36 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         first_subjects: list[str] = []
         second_subjects: list[str] = []
         third_subjects: list[str] = []
+        first_mailbox = client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        second_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        third_mailbox = client.mail.bind(pattern=r"a.*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        self.addCleanup(first_mailbox.close)
+        self.addCleanup(second_mailbox.close)
+        self.addCleanup(third_mailbox.close)
 
         def _listen_first() -> None:
-            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    first_subjects.append(message.subject)
+            for message in first_mailbox.listen(timeout=0.4):
+                first_subjects.append(message.subject)
 
         def _listen_second() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    second_subjects.append(message.subject)
+            for message in second_mailbox.listen(timeout=0.4):
+                second_subjects.append(message.subject)
 
         def _listen_third() -> None:
-            with client.mail.bind(pattern=r"a.*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    third_subjects.append(message.subject)
+            for message in third_mailbox.listen(timeout=0.4):
+                third_subjects.append(message.subject)
 
         first_listener = threading.Thread(target=_listen_first)
         second_listener = threading.Thread(target=_listen_second)
         third_listener = threading.Thread(target=_listen_third)
         first_listener.start()
-        time.sleep(0.05)
         second_listener.start()
-        time.sleep(0.05)
         third_listener.start()
-        time.sleep(0.05)
+        _wait_for(
+            lambda: first_mailbox._is_listening and second_mailbox._is_listening and third_mailbox._is_listening,
+            timeout=2.0,
+            description="overlap listener startup",
+        )
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -471,31 +491,36 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         first_subjects: list[str] = []
         second_subjects: list[str] = []
         third_subjects: list[str] = []
+        first_mailbox = client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        second_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        third_mailbox = client.mail.bind(pattern=re.compile(r".*e"), suffix=Suffix.linuxdo_space, allow_overlap=True)
+        self.addCleanup(first_mailbox.close)
+        self.addCleanup(second_mailbox.close)
+        self.addCleanup(third_mailbox.close)
 
         def _listen_first() -> None:
-            with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    first_subjects.append(message.subject)
+            for message in first_mailbox.listen(timeout=0.4):
+                first_subjects.append(message.subject)
 
         def _listen_second() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    second_subjects.append(message.subject)
+            for message in second_mailbox.listen(timeout=0.4):
+                second_subjects.append(message.subject)
 
         def _listen_third() -> None:
-            with client.mail.bind(pattern=re.compile(r".*e"), suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    third_subjects.append(message.subject)
+            for message in third_mailbox.listen(timeout=0.4):
+                third_subjects.append(message.subject)
 
         first_listener = threading.Thread(target=_listen_first)
         second_listener = threading.Thread(target=_listen_second)
         third_listener = threading.Thread(target=_listen_third)
         first_listener.start()
-        time.sleep(0.05)
         second_listener.start()
-        time.sleep(0.05)
         third_listener.start()
-        time.sleep(0.05)
+        _wait_for(
+            lambda: first_mailbox._is_listening and second_mailbox._is_listening and third_mailbox._is_listening,
+            timeout=2.0,
+            description="multi-overlap listener startup",
+        )
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -524,15 +549,16 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.addCleanup(client.close)
 
         received_subjects: list[str] = []
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(mailbox.close)
 
         def _consume() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.5):
-                    received_subjects.append(message.subject)
+            for message in mailbox.listen(timeout=0.5):
+                received_subjects.append(message.subject)
 
         listener = threading.Thread(target=_consume)
         listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: mailbox._is_listening, timeout=2.0, description="burst mailbox listener")
 
         for index in range(50):
             server.publish_mail(
@@ -576,7 +602,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         listener = threading.Thread(target=_consume)
         listener.start()
-        time.sleep(0.05)
+        _wait_for(lambda: mailbox._is_listening, timeout=2.0, description="late mailbox listener")
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -609,10 +635,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         worker = threading.Thread(target=_first_listener)
         worker.start()
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline and not mailbox._is_listening:
-            time.sleep(0.01)
-
+        _wait_for(lambda: mailbox._is_listening, timeout=1.0, description="single mailbox first listener")
         self.assertTrue(mailbox._is_listening)
 
         with self.assertRaisesRegex(LinuxDoSpaceError, "mailbox already has an active listener"):
@@ -636,23 +659,28 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         explicit_subjects: list[str] = []
         sugar_subjects: list[str] = []
+        explicit_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        sugar_mailbox = client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        self.addCleanup(explicit_mailbox.close)
+        self.addCleanup(sugar_mailbox.close)
 
         def _listen_explicit() -> None:
-            with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    explicit_subjects.append(message.subject)
+            for message in explicit_mailbox.listen(timeout=0.4):
+                explicit_subjects.append(message.subject)
 
         def _listen_sugar() -> None:
-            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    sugar_subjects.append(message.subject)
+            for message in sugar_mailbox.listen(timeout=0.4):
+                sugar_subjects.append(message.subject)
 
         explicit_listener = threading.Thread(target=_listen_explicit)
         sugar_listener = threading.Thread(target=_listen_sugar)
         explicit_listener.start()
-        time.sleep(0.05)
         sugar_listener.start()
-        time.sleep(0.05)
+        _wait_for(
+            lambda: explicit_mailbox._is_listening and sugar_mailbox._is_listening,
+            timeout=2.0,
+            description="explicit and sugar mailbox listeners",
+        )
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -829,6 +857,17 @@ def _sdk_message(address: str, *, recipients: tuple[str, ...] | None = None) -> 
         raw_bytes=b"probe",
         message=message,
     )
+
+
+def _wait_for(predicate: Callable[[], bool], *, timeout: float, description: str) -> None:
+    """Wait until one boolean predicate becomes true or fail the test clearly."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out while waiting for {description}")
 
 
 def _start_stream_server() -> tuple[_ThreadingTestHTTPServer, threading.Thread]:
