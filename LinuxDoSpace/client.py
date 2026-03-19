@@ -1,14 +1,13 @@
 """LinuxDoSpace Python SDK client.
 
-This SDK intentionally keeps one architectural invariant:
+The SDK keeps one strict runtime architecture:
 
-- one `Client` owns exactly one upstream HTTPS stream
-- the client parses every received mail event once
-- the client then fan-outs parsed messages to local sub-listeners created by
-  `client.mail(...)`
+- one `Client` owns one upstream HTTPS stream
+- the client parses every received mail event exactly once
+- the client fans parsed messages out to local mailbox bindings in memory
 
-This matches the backend contract: the server knows only the API token, while
-mailbox-level filtering and sub-dispatch happen entirely inside the client.
+This means the backend only knows about the API token. It does not need to know
+which exact mailboxes or regex rules the local process subscribed to.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import queue
+import re
 import socket
 import threading
 import time
@@ -49,7 +49,7 @@ _CLOSE_SENTINEL = object()
 
 @dataclass(slots=True)
 class _StreamEvent:
-    """Internal representation of one raw NDJSON stream event."""
+    """Internal representation of one NDJSON stream event line."""
 
     type: str
     payload: dict[str, Any]
@@ -57,14 +57,36 @@ class _StreamEvent:
 
 @dataclass(slots=True)
 class _StreamFailure:
-    """Sent through subscriber queues when the shared stream fails fatally."""
+    """Sent to local listener queues when the shared stream fails fatally."""
 
     error: LinuxDoSpaceError
 
 
 @dataclass(slots=True)
+class _MailBinding:
+    """One locally registered mailbox binding stored in creation order."""
+
+    mode: str
+    suffix: str
+    allow_overlap: bool
+    queue: queue.Queue[object]
+    prefix: str | None = None
+    compiled_pattern: re.Pattern[str] | None = None
+    pattern_text: str | None = None
+
+    def matches(self, local_part: str) -> bool:
+        """Report whether this binding matches the provided mailbox local part."""
+
+        if self.mode == "exact":
+            return self.prefix == local_part
+        if self.compiled_pattern is None:
+            return False
+        return self.compiled_pattern.fullmatch(local_part) is not None
+
+
+@dataclass(slots=True)
 class _ParsedMailEnvelope:
-    """Internal parsed representation shared across all local subscribers."""
+    """Internal parsed representation shared across all local listeners."""
 
     sender: str
     recipients: tuple[str, ...]
@@ -93,7 +115,7 @@ class _ParsedMailEnvelope:
     message: EmailMessage
 
     def to_message(self, address: str) -> MailMessage:
-        """Project the parsed envelope into the public SDK model."""
+        """Project the internal parsed envelope into the public SDK model."""
 
         return MailMessage(
             address=address,
@@ -125,18 +147,6 @@ class Client:
 
     One client owns exactly one upstream HTTPS stream and keeps it alive in a
     background thread from the moment the client is created.
-
-    Parameters
-    ----------
-    token:
-        The plaintext API token generated from the LinuxDoSpace web console.
-    base_url:
-        Backend base URL. Production defaults to `https://api.linuxdo.space`.
-    connect_timeout:
-        Timeout used when establishing one HTTPS connection.
-    stream_socket_timeout:
-        Per-read socket timeout for the live stream. When the underlying
-        connection stalls longer than this interval, the client reconnects.
     """
 
     def __init__(
@@ -163,11 +173,13 @@ class Client:
 
         self._closed = False
         self._connected = False
+
         self._active_response_lock = threading.Lock()
         self._active_response: Any | None = None
-        self._subscribers_lock = threading.Lock()
-        self._all_subscribers: set[queue.Queue[object]] = set()
-        self._mail_subscribers: dict[str, set[queue.Queue[object]]] = {}
+
+        self._listeners_lock = threading.Lock()
+        self._all_listeners: list[queue.Queue[object]] = []
+        self._mail_bindings_by_suffix: dict[str, list[_MailBinding]] = {}
 
         self._initial_connect_event = threading.Event()
         self._initial_connect_error: LinuxDoSpaceError | None = None
@@ -194,9 +206,15 @@ class Client:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        """Close the shared stream thread on context-manager exit."""
+        """Close the shared stream when leaving the context manager."""
 
         self.close()
+
+    @property
+    def connected(self) -> bool:
+        """Report whether the shared upstream HTTPS stream is currently alive."""
+
+        return self._connected and not self._closed and self._fatal_error is None
 
     def close(self) -> None:
         """Close the client and terminate all current local listeners."""
@@ -210,46 +228,85 @@ class Client:
         self._broadcast_control(_CLOSE_SENTINEL)
         self._reader_thread.join(timeout=self._connect_timeout + 1.0)
 
-    @property
-    def connected(self) -> bool:
-        """Report whether the shared upstream HTTPS stream is currently alive."""
-
-        return self._connected and not self._closed and self._fatal_error is None
-
-    def mail(self, prefix: str, suffix: Suffix | str) -> "MailBox":
-        """Create one mailbox listener bound to a concrete address."""
-
-        normalized_prefix = prefix.strip().lower()
-        normalized_suffix = str(suffix).strip().lower()
-        if not normalized_prefix:
-            raise ValueError("prefix must not be empty")
-        if not normalized_suffix:
-            raise ValueError("suffix must not be empty")
-
-        return MailBox(
-            client=self,
-            prefix=normalized_prefix,
-            suffix=normalized_suffix,
-        )
-
     def listen(self, timeout: float = -1) -> Iterator[MailMessage]:
         """Yield every mail event received by this client.
 
-        This is the "full receive" interface: it exposes all events delivered
-        to the current token stream, regardless of individual mailbox bindings.
-        The lighter `mail(...).listen()` helper is implemented as a filtered
-        local subscription on top of the same underlying client stream.
+        This is the canonical "full intake" interface. It exposes all mail
+        events delivered to the current token stream without any mailbox-level
+        filtering.
         """
 
         self._ensure_open()
-        subscriber_queue, unregister = self._register_all_listener()
+        listener_queue, unregister = self._register_all_listener()
         try:
-            yield from self._iterate_queue(subscriber_queue, timeout=timeout)
+            yield from self._iterate_queue(listener_queue, timeout=timeout)
         finally:
             unregister()
 
+    def mail(
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | re.Pattern[str] | None = None,
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> "MailBox":
+        """Create one mailbox binding on top of the shared client stream.
+
+        Exactly one of `prefix` or `pattern` must be provided.
+        Matching semantics are intentionally simple:
+
+        - all bindings for the same suffix are checked strictly in creation order
+        - exact and regex bindings live in the same ordered chain
+        - when a binding matches:
+          - it receives the message
+          - if `allow_overlap` is false, matching stops immediately
+          - if `allow_overlap` is true, scanning continues to later bindings
+        """
+
+        normalized_suffix = str(suffix).strip().lower()
+        if not normalized_suffix:
+            raise ValueError("suffix must not be empty")
+        if (prefix is None) == (pattern is None):
+            raise ValueError("exactly one of prefix or pattern must be provided")
+
+        if prefix is not None:
+            normalized_prefix = prefix.strip().lower()
+            if not normalized_prefix:
+                raise ValueError("prefix must not be empty")
+            return MailBox(
+                client=self,
+                mode="exact",
+                suffix=normalized_suffix,
+                allow_overlap=allow_overlap,
+                prefix=normalized_prefix,
+                pattern_text=None,
+                compiled_pattern=None,
+            )
+
+        return MailBox(
+            client=self,
+            mode="pattern",
+            suffix=normalized_suffix,
+            allow_overlap=allow_overlap,
+            prefix=None,
+            pattern_text=_normalize_pattern_text(pattern),
+            compiled_pattern=_compile_pattern(pattern),
+        )
+
+    def catch_all(
+        self,
+        *,
+        pattern: str | re.Pattern[str] = r".*",
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> "MailBox":
+        """Create one catch-all helper based on regex mailbox matching."""
+
+        return self.mail(pattern=pattern, suffix=suffix, allow_overlap=allow_overlap)
+
     def _run_stream_loop(self) -> None:
-        """Keep the single shared HTTPS stream alive in the background."""
+        """Keep the shared HTTPS stream alive in the background."""
 
         initial_attempt = True
 
@@ -298,7 +355,7 @@ class Client:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/x-ndjson",
-                "User-Agent": "LinuxDoSpace Python SDK/0.2.0a1",
+                "User-Agent": "LinuxDoSpace Python SDK/0.3.0a1",
             },
             method="GET",
         )
@@ -332,8 +389,7 @@ class Client:
                     if event.type != _MAIL_EVENT_TYPE:
                         continue
 
-                    parsed_envelope = _parse_mail_event(event)
-                    self._dispatch_parsed_envelope(parsed_envelope)
+                    self._dispatch_parsed_envelope(_parse_mail_event(event))
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403}:
                 raise AuthenticationError("api token was rejected by the LinuxDoSpace backend") from exc
@@ -349,13 +405,9 @@ class Client:
                 self._active_response = None
 
     def _dispatch_parsed_envelope(self, parsed_envelope: _ParsedMailEnvelope) -> None:
-        """Fan-out one parsed event to the all-listener and mailbox listeners."""
+        """Fan out one parsed event to the full listener and mailbox bindings."""
 
-        if parsed_envelope.recipients:
-            primary_address = parsed_envelope.recipients[0]
-        else:
-            primary_address = ""
-
+        primary_address = parsed_envelope.recipients[0] if parsed_envelope.recipients else ""
         self._broadcast_to_all(parsed_envelope.to_message(primary_address))
 
         delivered_addresses = set()
@@ -364,68 +416,95 @@ class Client:
             if not normalized_recipient or normalized_recipient in delivered_addresses:
                 continue
             delivered_addresses.add(normalized_recipient)
-            self._broadcast_to_mailbox(normalized_recipient, parsed_envelope.to_message(normalized_recipient))
+            self._dispatch_to_mail_bindings(normalized_recipient, parsed_envelope.to_message(normalized_recipient))
+
+    def _dispatch_to_mail_bindings(self, address: str, message: MailMessage) -> None:
+        """Dispatch one message through the ordered local mailbox-binding chain."""
+
+        local_part, at_sign, suffix = address.partition("@")
+        if not local_part or at_sign != "@":
+            return
+
+        with self._listeners_lock:
+            bindings = list(self._mail_bindings_by_suffix.get(suffix, []))
+
+        for binding in bindings:
+            if not binding.matches(local_part):
+                continue
+            binding.queue.put_nowait(message)
+            if not binding.allow_overlap:
+                break
 
     def _broadcast_to_all(self, item: object) -> None:
-        """Send one message to every client-level listener."""
+        """Send one message to every client-level full listener."""
 
-        with self._subscribers_lock:
-            subscribers = list(self._all_subscribers)
-        for subscriber_queue in subscribers:
-            subscriber_queue.put_nowait(item)
-
-    def _broadcast_to_mailbox(self, address: str, item: object) -> None:
-        """Send one message to every mailbox listener registered for `address`."""
-
-        with self._subscribers_lock:
-            subscribers = list(self._mail_subscribers.get(address, set()))
-        for subscriber_queue in subscribers:
-            subscriber_queue.put_nowait(item)
+        with self._listeners_lock:
+            listeners = list(self._all_listeners)
+        for listener_queue in listeners:
+            listener_queue.put_nowait(item)
 
     def _broadcast_control(self, item: object) -> None:
-        """Send one control object to every current listener queue."""
+        """Send one control object to every currently registered local listener."""
 
-        with self._subscribers_lock:
-            all_subscribers = list(self._all_subscribers)
-            mailbox_subscribers = [subscriber for subscribers in self._mail_subscribers.values() for subscriber in subscribers]
+        with self._listeners_lock:
+            full_listeners = list(self._all_listeners)
+            mail_listener_queues = [binding.queue for bindings in self._mail_bindings_by_suffix.values() for binding in bindings]
 
-        for subscriber_queue in all_subscribers + mailbox_subscribers:
-            subscriber_queue.put_nowait(item)
+        for listener_queue in full_listeners + mail_listener_queues:
+            listener_queue.put_nowait(item)
 
     def _register_all_listener(self) -> tuple[queue.Queue[object], Callable[[], None]]:
-        """Register one client-level listener queue."""
+        """Register one client-level full listener queue."""
 
-        subscriber_queue: queue.Queue[object] = queue.Queue()
-        with self._subscribers_lock:
-            self._all_subscribers.add(subscriber_queue)
-
-        def _unregister() -> None:
-            with self._subscribers_lock:
-                self._all_subscribers.discard(subscriber_queue)
-
-        return subscriber_queue, _unregister
-
-    def _register_mail_listener(self, address: str) -> tuple[queue.Queue[object], Callable[[], None]]:
-        """Register one mailbox-level listener queue for a specific address."""
-
-        normalized_address = address.strip().lower()
-        subscriber_queue: queue.Queue[object] = queue.Queue()
-        with self._subscribers_lock:
-            self._mail_subscribers.setdefault(normalized_address, set()).add(subscriber_queue)
+        listener_queue: queue.Queue[object] = queue.Queue()
+        with self._listeners_lock:
+            self._all_listeners.append(listener_queue)
 
         def _unregister() -> None:
-            with self._subscribers_lock:
-                subscribers = self._mail_subscribers.get(normalized_address)
-                if subscribers is None:
+            with self._listeners_lock:
+                self._all_listeners = [item for item in self._all_listeners if item is not listener_queue]
+
+        return listener_queue, _unregister
+
+    def _register_mail_binding(
+        self,
+        *,
+        mode: str,
+        suffix: str,
+        allow_overlap: bool,
+        prefix: str | None,
+        pattern_text: str | None,
+        compiled_pattern: re.Pattern[str] | None,
+    ) -> tuple[queue.Queue[object], Callable[[], None]]:
+        """Register one mailbox binding in the ordered local dispatch chain."""
+
+        listener_queue: queue.Queue[object] = queue.Queue()
+        binding = _MailBinding(
+            mode=mode,
+            suffix=suffix,
+            allow_overlap=allow_overlap,
+            queue=listener_queue,
+            prefix=prefix,
+            compiled_pattern=compiled_pattern,
+            pattern_text=pattern_text,
+        )
+
+        with self._listeners_lock:
+            self._mail_bindings_by_suffix.setdefault(suffix, []).append(binding)
+
+        def _unregister() -> None:
+            with self._listeners_lock:
+                bindings = self._mail_bindings_by_suffix.get(suffix)
+                if bindings is None:
                     return
-                subscribers.discard(subscriber_queue)
-                if not subscribers:
-                    self._mail_subscribers.pop(normalized_address, None)
+                bindings[:] = [item for item in bindings if item.queue is not listener_queue]
+                if not bindings:
+                    self._mail_bindings_by_suffix.pop(suffix, None)
 
-        return subscriber_queue, _unregister
+        return listener_queue, _unregister
 
-    def _iterate_queue(self, subscriber_queue: queue.Queue[object], *, timeout: float = -1) -> Iterator[MailMessage]:
-        """Yield items from one local subscriber queue with total timeout control."""
+    def _iterate_queue(self, listener_queue: queue.Queue[object], *, timeout: float = -1) -> Iterator[MailMessage]:
+        """Yield items from one local listener queue with total timeout control."""
 
         deadline = None if timeout < 0 else time.monotonic() + float(timeout)
 
@@ -439,7 +518,7 @@ class Client:
             wait_timeout = _WAIT_POLL_INTERVAL_SECONDS if remaining_seconds is None else max(0.01, min(_WAIT_POLL_INTERVAL_SECONDS, remaining_seconds))
 
             try:
-                item = subscriber_queue.get(timeout=wait_timeout)
+                item = listener_queue.get(timeout=wait_timeout)
             except queue.Empty:
                 continue
 
@@ -480,39 +559,60 @@ class Client:
 
 
 class MailBox:
-    """Context-managed mailbox listener bound to one concrete address."""
+    """Context-managed mailbox binding living on top of one shared client stream."""
 
-    def __init__(self, *, client: Client, prefix: str, suffix: str) -> None:
+    def __init__(
+        self,
+        *,
+        client: Client,
+        mode: str,
+        suffix: str,
+        allow_overlap: bool,
+        prefix: str | None,
+        pattern_text: str | None,
+        compiled_pattern: re.Pattern[str] | None,
+    ) -> None:
         self._client = client
-        self.prefix = prefix
+        self.mode = mode
         self.suffix = suffix
-        self.address = f"{self.prefix}@{self.suffix}"
+        self.allow_overlap = allow_overlap
+        self.prefix = prefix
+        self.pattern = pattern_text
+        self._compiled_pattern = compiled_pattern
+        self.address = f"{self.prefix}@{self.suffix}" if self.prefix is not None else None
         self._closed = False
 
     def __enter__(self) -> "MailBox":
-        """Return the active mailbox helper."""
+        """Return the active mailbox binding helper."""
 
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        """Mark the logical mailbox helper as closed."""
+        """Mark the logical mailbox binding as closed."""
 
         self.close()
 
     def close(self) -> None:
-        """Close the logical mailbox helper."""
+        """Close the logical mailbox binding."""
 
         self._closed = True
 
     def listen(self, timeout: float = -1) -> Iterator[MailMessage]:
-        """Yield messages matching this mailbox address from the shared client stream."""
+        """Yield messages matching this mailbox binding from the shared client stream."""
 
         if self._closed:
             raise LinuxDoSpaceError("mailbox stream is already closed")
 
-        subscriber_queue, unregister = self._client._register_mail_listener(self.address)
+        listener_queue, unregister = self._client._register_mail_binding(
+            mode=self.mode,
+            suffix=self.suffix,
+            allow_overlap=self.allow_overlap,
+            prefix=self.prefix,
+            pattern_text=self.pattern,
+            compiled_pattern=self._compiled_pattern,
+        )
         try:
-            yield from self._client._iterate_queue(subscriber_queue, timeout=timeout)
+            yield from self._client._iterate_queue(listener_queue, timeout=timeout)
         finally:
             unregister()
 
@@ -535,7 +635,7 @@ def _decode_stream_event(raw_line: bytes) -> _StreamEvent:
 def _parse_mail_event(event: _StreamEvent) -> _ParsedMailEnvelope:
     """Parse one raw stream event into a reusable internal mail envelope."""
 
-    recipient_candidates = tuple(
+    recipients = tuple(
         str(value).strip().lower()
         for value in event.payload.get("original_recipients", [])
         if str(value).strip()
@@ -554,7 +654,7 @@ def _parse_mail_event(event: _StreamEvent) -> _ParsedMailEnvelope:
 
     return _ParsedMailEnvelope(
         sender=str(event.payload.get("original_envelope_from", "")).strip(),
-        recipients=recipient_candidates,
+        recipients=recipients,
         received_at=_parse_iso_datetime(str(event.payload.get("received_at", "")).strip()),
         subject=str(email_message.get("Subject", "")),
         message_id=_optional_header(email_message, "Message-ID"),
@@ -679,6 +779,32 @@ def _normalize_base_url(raw_base_url: str) -> str:
     if parsed_url.scheme != "https" and hostname not in _LOCALHOST_NAMES and not hostname.endswith(".localhost"):
         raise ValueError("non-local base_url must use https")
 
+    return normalized_value
+
+
+def _compile_pattern(value: str | re.Pattern[str] | None) -> re.Pattern[str]:
+    """Compile one mailbox regex pattern into a reusable regex object."""
+
+    if value is None:
+        raise ValueError("pattern must not be empty")
+    if isinstance(value, re.Pattern):
+        return value
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("pattern must not be empty")
+    return re.compile(normalized_value)
+
+
+def _normalize_pattern_text(value: str | re.Pattern[str] | None) -> str:
+    """Normalize one pattern into a user-facing text representation."""
+
+    if value is None:
+        raise ValueError("pattern must not be empty")
+    if isinstance(value, re.Pattern):
+        return value.pattern
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("pattern must not be empty")
     return normalized_value
 
 

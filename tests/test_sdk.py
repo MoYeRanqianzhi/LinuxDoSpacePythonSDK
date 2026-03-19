@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import queue
+import re
 import threading
 import time
 import unittest
@@ -14,7 +15,7 @@ from LinuxDoSpace import Client, Suffix
 
 
 class LinuxDoSpaceSDKTests(unittest.TestCase):
-    """Validate the single-connection client architecture end to end."""
+    """Validate the single-stream shared-client architecture end to end."""
 
     def test_client_rejects_non_https_remote_base_url(self) -> None:
         """Remote non-local backend URLs should be rejected to protect the token."""
@@ -98,7 +99,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         results: "queue.Queue[tuple[str, str]]" = queue.Queue()
 
         def _listen(prefix: str) -> None:
-            with client.mail(prefix, Suffix.linuxdo_space) as mailbox:
+            with client.mail(prefix=prefix, suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     results.put((prefix, message.subject))
                     break
@@ -131,58 +132,6 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
         self.assertEqual(server.request_count, 1)
 
-    def test_mailboxes_filter_locally_without_server_side_mailbox_awareness(self) -> None:
-        """Mailbox listeners should receive only their own messages while the server still sees one token stream."""
-
-        server, thread = _start_stream_server()
-        self.addCleanup(_cleanup_stream_server, server, thread)
-
-        client = Client(
-            token="lds_pat.tok123.supersecret",
-            base_url=f"http://127.0.0.1:{server.server_port}",
-            stream_socket_timeout=0.2,
-        )
-        self.addCleanup(client.close)
-
-        alice_subjects: list[str] = []
-        bob_subjects: list[str] = []
-
-        def _listen_alice() -> None:
-            with client.mail("alice", Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    alice_subjects.append(message.subject)
-
-        def _listen_bob() -> None:
-            with client.mail("bob", Suffix.linuxdo_space) as mailbox:
-                for message in mailbox.listen(timeout=0.4):
-                    bob_subjects.append(message.subject)
-
-        alice_listener = threading.Thread(target=_listen_alice)
-        bob_listener = threading.Thread(target=_listen_bob)
-        alice_listener.start()
-        bob_listener.start()
-        time.sleep(0.05)
-
-        server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Alice Only", "alice body"),
-        )
-        server.publish_mail(
-            "bob@linuxdo.space",
-            _raw_message("bob@linuxdo.space", "Bob Only", "bob body"),
-        )
-        server.publish_mail(
-            "carol@linuxdo.space",
-            _raw_message("carol@linuxdo.space", "Carol Only", "carol body"),
-        )
-
-        alice_listener.join(timeout=2.0)
-        bob_listener.join(timeout=2.0)
-
-        self.assertEqual(alice_subjects, ["Alice Only"])
-        self.assertEqual(bob_subjects, ["Bob Only"])
-        self.assertEqual(server.request_count, 1)
-
     def test_full_listener_and_mailbox_listeners_can_run_together(self) -> None:
         """The full listener and filtered mailbox listeners should share one upstream stream."""
 
@@ -204,7 +153,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
                 all_subjects.append(message.subject)
 
         def _listen_alice() -> None:
-            with client.mail("alice", Suffix.linuxdo_space) as mailbox:
+            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.4):
                     alice_subjects.append(message.subject)
 
@@ -230,6 +179,161 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(alice_subjects, ["Alice Shared"])
         self.assertEqual(server.request_count, 1)
 
+    def test_pure_creation_order_applies_to_exact_and_pattern_bindings(self) -> None:
+        """Mailbox matching should follow binding creation order, not exact-value priority."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        pattern_subjects: list[str] = []
+        exact_subjects: list[str] = []
+
+        def _listen_pattern() -> None:
+            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    pattern_subjects.append(message.subject)
+
+        def _listen_exact() -> None:
+            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    exact_subjects.append(message.subject)
+
+        pattern_listener = threading.Thread(target=_listen_pattern)
+        exact_listener = threading.Thread(target=_listen_exact)
+        pattern_listener.start()
+        time.sleep(0.05)
+        exact_listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "Ordered Match", "alice body"),
+        )
+
+        pattern_listener.join(timeout=2.0)
+        exact_listener.join(timeout=2.0)
+
+        self.assertEqual(pattern_subjects, ["Ordered Match"])
+        self.assertEqual(exact_subjects, [])
+        self.assertEqual(server.request_count, 1)
+
+    def test_allow_overlap_continues_to_later_bindings(self) -> None:
+        """A matching binding with allow_overlap should let later bindings receive the message too."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        first_subjects: list[str] = []
+        second_subjects: list[str] = []
+        third_subjects: list[str] = []
+
+        def _listen_first() -> None:
+            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    first_subjects.append(message.subject)
+
+        def _listen_second() -> None:
+            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    second_subjects.append(message.subject)
+
+        def _listen_third() -> None:
+            with client.mail(pattern=r"a.*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    third_subjects.append(message.subject)
+
+        first_listener = threading.Thread(target=_listen_first)
+        second_listener = threading.Thread(target=_listen_second)
+        third_listener = threading.Thread(target=_listen_third)
+        first_listener.start()
+        time.sleep(0.05)
+        second_listener.start()
+        time.sleep(0.05)
+        third_listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "Overlap Match", "alice body"),
+        )
+
+        first_listener.join(timeout=2.0)
+        second_listener.join(timeout=2.0)
+        third_listener.join(timeout=2.0)
+
+        self.assertEqual(first_subjects, ["Overlap Match"])
+        self.assertEqual(second_subjects, ["Overlap Match"])
+        self.assertEqual(third_subjects, [])
+
+    def test_multiple_overlap_bindings_all_receive(self) -> None:
+        """When each matching binding allows overlap, they should all receive the same message."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        first_subjects: list[str] = []
+        second_subjects: list[str] = []
+        third_subjects: list[str] = []
+
+        def _listen_first() -> None:
+            with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    first_subjects.append(message.subject)
+
+        def _listen_second() -> None:
+            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    second_subjects.append(message.subject)
+
+        def _listen_third() -> None:
+            with client.mail(pattern=re.compile(r".*e"), suffix=Suffix.linuxdo_space, allow_overlap=True) as mailbox:
+                for message in mailbox.listen(timeout=0.4):
+                    third_subjects.append(message.subject)
+
+        first_listener = threading.Thread(target=_listen_first)
+        second_listener = threading.Thread(target=_listen_second)
+        third_listener = threading.Thread(target=_listen_third)
+        first_listener.start()
+        time.sleep(0.05)
+        second_listener.start()
+        time.sleep(0.05)
+        third_listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "All Receive", "alice body"),
+        )
+
+        first_listener.join(timeout=2.0)
+        second_listener.join(timeout=2.0)
+        third_listener.join(timeout=2.0)
+
+        self.assertEqual(first_subjects, ["All Receive"])
+        self.assertEqual(second_subjects, ["All Receive"])
+        self.assertEqual(third_subjects, ["All Receive"])
+
     def test_burst_delivery_remains_stable(self) -> None:
         """A short burst of many messages should be delivered without loss."""
 
@@ -246,7 +350,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         received_subjects: list[str] = []
 
         def _consume() -> None:
-            with client.mail("alice", Suffix.linuxdo_space) as mailbox:
+            with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
                 for message in mailbox.listen(timeout=0.5):
                     received_subjects.append(message.subject)
 

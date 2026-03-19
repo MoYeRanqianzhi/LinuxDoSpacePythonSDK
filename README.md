@@ -36,7 +36,7 @@ with Client(token="你的 API Token") as client:
 from LinuxDoSpace import Client, Suffix
 
 with Client(token="你的 API Token") as client:
-    with client.mail("alice", Suffix.linuxdo_space) as mail:
+    with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as mail:
         for item in mail.listen(timeout=60):
             print(item.address)
             print(item.sender)
@@ -50,12 +50,23 @@ with Client(token="你的 API Token") as client:
 from LinuxDoSpace import Client, Suffix
 
 with Client(token="你的 API Token") as client:
-    with client.mail("alice", Suffix.linuxdo_space) as alice:
-        with client.mail("bob", Suffix.linuxdo_space) as bob:
+    with client.mail(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
+        with client.mail(prefix="bob", suffix=Suffix.linuxdo_space) as bob:
             for item in alice.listen(timeout=60):
                 print("alice", item.subject)
             for item in bob.listen(timeout=60):
                 print("bob", item.subject)
+```
+
+正则绑定也可以直接使用：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    with client.mail(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as catch_all:
+        for item in catch_all.listen(timeout=60):
+            print(item.address, item.subject)
 ```
 
 ## 设计说明
@@ -64,7 +75,8 @@ with Client(token="你的 API Token") as client:
 - 一个 `Client` 始终只维护一条到 `/v1/token/email/stream` 的真实连接
 - `Client` 会统一接收、统一解析、统一分发收到的所有邮件事件
 - `client.listen(timeout=-1)` 是最核心的“全量接收”接口
-- `client.mail(prefix, suffix).listen(...)` 是建立在同一个 `Client` 分发器之上的本地过滤便利层
+- `client.mail(prefix=..., suffix=...).listen(...)` 是精确邮箱绑定
+- `client.mail(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
 - `Suffix` 是一个专门的枚举类型，避免把后缀写成普通字符串
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
 - 如果 `timeout` 为正数，则表示本次监听的最长总时长（秒）
@@ -77,6 +89,24 @@ with Client(token="你的 API Token") as client:
 - 客户端内部会根据邮件中的收件地址，在本地内存里完成筛选和分发
 - 因此多个 `mail()` 绑定不会增加服务端的上游连接数
 - 单个 `mail()` 只是方便函数，底层依赖的是 `Client` 级全量接收
+
+## 匹配规则
+
+- `prefix` 和 `pattern` 必须二选一
+- 精确绑定和正则绑定不会分成两套优先级
+- 所有同一 `suffix` 下的绑定都按创建顺序进入同一条匹配链
+- 某个绑定一旦匹配成功：
+  - 它一定会收到消息
+  - 如果 `allow_overlap=False`，则立即停止，不再继续检查后面的绑定
+  - 如果 `allow_overlap=True`，则继续向后匹配，允许多个绑定同时收到
+- 正则匹配使用的是邮箱本地前缀的 `fullmatch()`，不是 `search()`
+
+示例：
+
+- 如果先创建 `pattern=r".*"`，后创建 `prefix="alice"`，而第一个绑定没有开启 `allow_overlap`
+  那么 `alice@linuxdo.space` 会先命中 `.*`，并在那里停止，后面的精确绑定不会收到
+- 如果先创建 `pattern=r".*"`, 且它设置了 `allow_overlap=True`
+  后面创建的 `prefix="alice"` 也能继续收到
 
 ## 当前暴露的主要属性
 
