@@ -66,6 +66,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         listener = threading.Thread(target=_consume)
         listener.start()
         _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="full listener registration")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -122,6 +123,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
             timeout=2.0,
             description="parallel mailbox listeners",
         )
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -288,6 +290,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         alice_listener.start()
         _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="shared full listener registration")
         _wait_for(lambda: alice_mailbox._is_listening, timeout=2.0, description="alice mailbox listener")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -339,6 +342,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         exact_listener.start()
         _wait_for(lambda: pattern_mailbox._is_listening, timeout=2.0, description="pattern mailbox listener")
         _wait_for(lambda: exact_mailbox._is_listening, timeout=2.0, description="exact mailbox listener")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -379,6 +383,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         listener = threading.Thread(target=_consume)
         listener.start()
         _wait_for(lambda: len(client._all_listeners) == 1, timeout=2.0, description="route helper full listener registration")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -461,6 +466,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
             timeout=2.0,
             description="overlap listener startup",
         )
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -521,6 +527,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
             timeout=2.0,
             description="multi-overlap listener startup",
         )
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -559,6 +566,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         listener = threading.Thread(target=_consume)
         listener.start()
         _wait_for(lambda: mailbox._is_listening, timeout=2.0, description="burst mailbox listener")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         for index in range(50):
             server.publish_mail(
@@ -588,6 +596,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
         self.addCleanup(mailbox.close)
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -603,6 +612,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         listener = threading.Thread(target=_consume)
         listener.start()
         _wait_for(lambda: mailbox._is_listening, timeout=2.0, description="late mailbox listener")
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -681,6 +691,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
             timeout=2.0,
             description="explicit and sugar mailbox listeners",
         )
+        self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
             "alice@linuxdo.space",
@@ -771,6 +782,17 @@ class _ThreadingTestHTTPServer(ThreadingHTTPServer):
 
         with self._subscribers_lock:
             self._subscribers.append(writer)
+
+    def wait_for_subscribers(self, expected_count: int, timeout: float) -> bool:
+        """Wait until the expected number of stream subscribers is connected."""
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._subscribers_lock:
+                if len(self._subscribers) >= expected_count:
+                    return True
+            time.sleep(0.01)
+        return False
 
     def unregister_subscriber(self, writer: object) -> None:
         """Remove one HTTP response writer from the broadcast set."""
