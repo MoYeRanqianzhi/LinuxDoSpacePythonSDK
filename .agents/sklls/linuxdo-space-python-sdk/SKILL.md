@@ -7,6 +7,7 @@ description: Use when implementing, fixing, refactoring, testing, or documenting
 
 Read [references/api.md](references/api.md) before changing any public behavior.
 Read [references/development.md](references/development.md) before editing code, tests, or README.
+Read [references/examples.md](references/examples.md) when you need task-shaped templates for common SDK changes.
 
 ## Workflow
 
@@ -39,6 +40,7 @@ python -m pip install -e .
 - Add or change API: read `references/api.md`, edit `../../../LinuxDoSpace/*.py`, update `../../../README.md`, update `../../../tests/test_sdk.py`, run both validation commands.
 - Fix lifecycle, queue, or ordering bugs: inspect `../../../LinuxDoSpace/client.py` and the integration tests first; do not infer semantics from README alone.
 - Add examples: keep them aligned with the preferred explicit API and current lifecycle semantics.
+- Use ready-made task templates: read `references/examples.md`.
 - Diagnose failures: prefer `AuthenticationError`, then `StreamError`, then generic `LinuxDoSpaceError` handling.
 
 ## Do Not Regress
