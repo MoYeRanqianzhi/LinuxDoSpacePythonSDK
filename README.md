@@ -47,7 +47,7 @@ with Client(token="你的 API Token") as client:
         mail.close()
 ```
 
-如果你更喜欢 `with`，它只是上面显式注册写法的语法糖：
+如果你更喜欢 `with`，它只是上面显式注册写法的语法糖，并且会在离开作用域时自动解绑：
 
 ```python
 from LinuxDoSpace import Client, Suffix
@@ -59,6 +59,25 @@ with Client(token="你的 API Token") as client:
             print(item.sender)
             print(item.subject)
             print(item.text)
+```
+
+如果你要一次性注册多条绑定，可以显式批量注册：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    with client.mail.bind_many(
+        client.mail.spec(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True),
+        client.mail.spec(prefix="alice", suffix=Suffix.linuxdo_space),
+        client.mail.spec(prefix="bob", suffix=Suffix.linuxdo_space),
+    ) as bindings:
+        catch_all = bindings[0]
+        alice = bindings[1]
+        bob = bindings[2]
+
+        for item in alice.listen(timeout=60):
+            print("alice", item.subject)
 ```
 
 多个邮箱可以并行复用同一个 `Client`：
@@ -88,14 +107,71 @@ with Client(token="你的 API Token") as client:
 
 如果你确实想保留旧的简写风格，`client.mail(...)` 仍然可用，但它只是 `client.mail.bind(...)` 的同义写法。
 
+## 显式解绑
+
+除了 `with` 自动解绑以外，也可以显式调用：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    alice = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+    catch_all = client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+
+    try:
+        for item in alice.listen(timeout=60):
+            print(item.subject)
+    finally:
+        client.mail.unbind(alice, catch_all)
+```
+
+## 全量流到子绑定的本地路由辅助
+
+`client.listen(...)` 是完整接收接口。  
+如果你在消费完整流时，想知道当前消息会命中哪些本地子绑定，可以使用只读路由辅助：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    with client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True) as catch_all:
+        with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
+            for item in client.listen(timeout=60):
+                matched = client.mail.route(item)
+                print(item.address, [mailbox.address or mailbox.pattern for mailbox in matched])
+```
+
+`client.mail.route(item)` 不会重复投递，只会按当前的本地有序匹配链给出“这封邮件会命中哪些子绑定”的结果。
+
+## 异常处理
+
+```python
+from LinuxDoSpace import AuthenticationError, Client, LinuxDoSpaceError, StreamError
+
+try:
+    with Client(token="你的 API Token") as client:
+        for item in client.listen(timeout=60):
+            print(item.subject)
+except AuthenticationError:
+    print("Token 无效，或后端拒绝了当前 Token。")
+except StreamError:
+    print("HTTPS 实时流建立失败，或者流中断。")
+except LinuxDoSpaceError as exc:
+    print(f"SDK 运行失败: {exc}")
+```
+
 ## 设计说明
 
 - `Client` 创建后会立即建立一条共享的 HTTPS 上游连接
 - 一个 `Client` 始终只维护一条到 `/v1/token/email/stream` 的真实连接
 - `Client` 会统一接收、统一解析、统一分发收到的所有邮件事件
 - `client.listen(timeout=-1)` 是最核心的“全量接收”接口
+- `client.mail.bind(...)` 在创建时就会立即注册本地绑定
+- `mail.close()` 会立即解绑；离开 `with` 作用域也会立即解绑
 - `client.mail.bind(prefix=..., suffix=...).listen(...)` 是精确邮箱绑定
 - `client.mail.bind(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
+- `client.mail.bind_many(...)` 可以一次注册多条有序绑定
+- `client.mail.route(message)` 可以查看全量消息会命中哪些本地子绑定
 - `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
 - `Suffix` 是一个专门的枚举类型，避免把后缀写成普通字符串
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
@@ -108,7 +184,9 @@ with Client(token="你的 API Token") as client:
 - 服务端不会知道客户端内部绑定了哪些邮箱
 - 客户端内部会根据邮件中的收件地址，在本地内存里完成筛选和分发
 - 因此多个 `mail.bind()` 绑定不会增加服务端的上游连接数
-- 单个 `mail.bind()` 只是方便函数，底层依赖的是 `Client` 级全量接收
+- `client.listen(...)` 负责完整接收
+- `client.mail.route(...)` 负责说明全量消息在本地会落到哪些子绑定
+- `mail.listen(...)` 负责消费某一个已经注册完成的本地子队列
 
 ## 匹配规则
 
@@ -161,3 +239,4 @@ with Client(token="你的 API Token") as client:
 - 如果服务端发现当前没有任何客户端连接，邮件事件会被直接丢弃，不会排队补发
 - SDK 默认要求远程后端使用 `https://`；只有 `localhost` / `127.0.0.1` / `::1` 这类本地调试地址允许使用 `http://`
 - 如果你需要对一个 Token 下的所有邮件做统一处理，请优先使用 `client.listen(...)`
+- 同一个 `MailBox` 实例只允许一个活动监听器；如果你需要并行消费，请显式注册多个绑定实例

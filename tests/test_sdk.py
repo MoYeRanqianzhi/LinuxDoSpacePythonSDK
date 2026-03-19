@@ -9,9 +9,12 @@ import re
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from LinuxDoSpace import Client, Suffix
+from LinuxDoSpace import Client, LinuxDoSpaceError, Suffix
+from LinuxDoSpace.models import MailMessage
 
 
 class LinuxDoSpaceSDKTests(unittest.TestCase):
@@ -132,6 +135,73 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
         self.assertEqual(server.request_count, 1)
 
+    def test_mailbox_registers_immediately_and_unbinds_on_with_exit(self) -> None:
+        """Leaving the mailbox context should explicitly unregister that binding."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        probe_message = _sdk_message("alice@linuxdo.space")
+
+        with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
+            matched = client.mail.route(probe_message)
+            self.assertEqual(matched, (mailbox,))
+            self.assertFalse(mailbox.closed)
+
+        self.assertEqual(client.mail.route(probe_message), ())
+        self.assertTrue(mailbox.closed)
+
+    def test_explicit_unbind_removes_active_binding(self) -> None:
+        """The facade should support explicit mailbox unbinding outside `with`."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        probe_message = _sdk_message("alice@linuxdo.space")
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+
+        self.assertEqual(client.mail.route(probe_message), (mailbox,))
+        client.mail.unbind(mailbox)
+        self.assertEqual(client.mail.route(probe_message), ())
+        self.assertTrue(mailbox.closed)
+
+    def test_bind_many_registers_one_ordered_group(self) -> None:
+        """Batch registration should preserve caller order exactly."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        with client.mail.bind_many(
+            client.mail.spec(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True),
+            client.mail.spec(prefix="alice", suffix=Suffix.linuxdo_space),
+        ) as bindings:
+            self.assertEqual(len(bindings), 2)
+            matched = client.mail.route(_sdk_message("alice@linuxdo.space"))
+            self.assertEqual(matched, (bindings[0], bindings[1]))
+
+        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+
     def test_full_listener_and_mailbox_listeners_can_run_together(self) -> None:
         """The full listener and filtered mailbox listeners should share one upstream stream."""
 
@@ -223,6 +293,44 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(pattern_subjects, ["Ordered Match"])
         self.assertEqual(exact_subjects, [])
         self.assertEqual(server.request_count, 1)
+
+    def test_route_helper_matches_full_listener_message_in_same_order(self) -> None:
+        """`client.mail.route(...)` should mirror the local ordered binding chain."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        pattern_mailbox = client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
+        exact_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(pattern_mailbox.close)
+        self.addCleanup(exact_mailbox.close)
+
+        collected: list[MailMessage] = []
+
+        def _consume() -> None:
+            for message in client.listen(timeout=0.4):
+                collected.append(message)
+
+        listener = threading.Thread(target=_consume)
+        listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "Route Mirror", "alice body"),
+        )
+
+        listener.join(timeout=2.0)
+
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(client.mail.route(collected[0]), (pattern_mailbox, exact_mailbox))
 
     def test_allow_overlap_continues_to_later_bindings(self) -> None:
         """A matching binding with allow_overlap should let later bindings receive the message too."""
@@ -370,6 +478,40 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(received_subjects[0], "Burst 0")
         self.assertEqual(received_subjects[-1], "Burst 49")
         self.assertEqual(server.request_count, 1)
+
+    def test_one_mailbox_rejects_multiple_concurrent_listeners(self) -> None:
+        """A single mailbox instance should not split one queue across multiple listeners."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(mailbox.close)
+
+        def _first_listener() -> None:
+            for _ in mailbox.listen(timeout=1.0):
+                break
+
+        worker = threading.Thread(target=_first_listener)
+        worker.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not mailbox._is_listening:
+            time.sleep(0.01)
+
+        self.assertTrue(mailbox._is_listening)
+
+        with self.assertRaisesRegex(LinuxDoSpaceError, "mailbox already has an active listener"):
+            next(mailbox.listen(timeout=0.1))
+
+        mailbox.close()
+        worker.join(timeout=2.0)
 
     def test_mail_call_remains_sugar_over_explicit_bind(self) -> None:
         """`client.mail(...)` should behave exactly like the explicit `bind(...)` form."""
@@ -546,6 +688,38 @@ def _raw_message(recipient: str, subject: str, body: str) -> bytes:
         "\r\n"
         f"{body}"
     ).encode("utf-8")
+
+
+def _sdk_message(address: str) -> MailMessage:
+    """Build one minimal public SDK message object for routing-only tests."""
+
+    message = EmailMessage()
+    message["From"] = "sender@example.com"
+    message["To"] = address
+    message["Subject"] = "Probe"
+    return MailMessage(
+        address=address,
+        sender="sender@example.com",
+        recipients=(address,),
+        received_at=datetime(2026, 3, 20, 10, 11, 12, tzinfo=timezone.utc),
+        subject="Probe",
+        message_id=None,
+        date=None,
+        from_header="sender@example.com",
+        to_header=address,
+        cc_header="",
+        reply_to_header="",
+        from_addresses=("sender@example.com",),
+        to_addresses=(address,),
+        cc_addresses=(),
+        reply_to_addresses=(),
+        text="probe",
+        html="",
+        headers={},
+        raw="probe",
+        raw_bytes=b"probe",
+        message=message,
+    )
 
 
 def _start_stream_server() -> tuple[_ThreadingTestHTTPServer, threading.Thread]:

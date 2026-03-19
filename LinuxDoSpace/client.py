@@ -69,6 +69,7 @@ class _MailBinding:
     mode: str
     suffix: str
     allow_overlap: bool
+    mailbox: MailBox
     queue: queue.Queue[object]
     prefix: str | None = None
     compiled_pattern: re.Pattern[str] | None = None
@@ -140,6 +141,20 @@ class _ParsedMailEnvelope:
             raw_bytes=self.raw_bytes,
             message=self.message,
         )
+
+
+@dataclass(slots=True, frozen=True)
+class MailBindingSpec:
+    """One explicit mailbox-binding definition used for batch registration.
+
+    The spec object exists so callers can prepare an ordered binding chain
+    first and register it in one explicit step with `client.mail.bind_many(...)`.
+    """
+
+    suffix: Suffix | str
+    prefix: str | None = None
+    pattern: str | re.Pattern[str] | None = None
+    allow_overlap: bool = False
 
 
 class Client:
@@ -273,6 +288,8 @@ class Client:
           - if `allow_overlap` is false, matching stops immediately
           - if `allow_overlap` is true, scanning continues to later bindings
         """
+
+        self._ensure_open()
 
         normalized_suffix = str(suffix).strip().lower()
         if not normalized_suffix:
@@ -436,19 +453,64 @@ class Client:
     def _dispatch_to_mail_bindings(self, address: str, message: MailMessage) -> None:
         """Dispatch one message through the ordered local mailbox-binding chain."""
 
+        for binding in self._match_mail_bindings_for_address(address):
+            binding.queue.put_nowait(message)
+
+    def _match_mail_bindings_for_address(self, address: str) -> list[_MailBinding]:
+        """Resolve the ordered matching binding chain for one mailbox address."""
+
         local_part, at_sign, suffix = address.partition("@")
         if not local_part or at_sign != "@":
-            return
+            return []
 
         with self._listeners_lock:
             bindings = list(self._mail_bindings_by_suffix.get(suffix, []))
 
+        matched_bindings: list[_MailBinding] = []
         for binding in bindings:
             if not binding.matches(local_part):
                 continue
-            binding.queue.put_nowait(message)
+            matched_bindings.append(binding)
             if not binding.allow_overlap:
                 break
+        return matched_bindings
+
+    def _resolve_mailboxes_for_message(self, message: MailMessage) -> tuple[MailBox, ...]:
+        """Resolve which currently active mailboxes would match one message.
+
+        This is a read-only routing helper for callers that consume the full
+        `client.listen(...)` stream and want to inspect which local mailbox
+        bindings would receive a given message under the current ordered chain.
+        """
+
+        resolved_mailboxes: list[MailBox] = []
+        seen_mailbox_ids: set[int] = set()
+        resolved_recipients: list[str] = []
+
+        for recipient in message.recipients:
+            normalized_recipient = recipient.strip().lower()
+            if normalized_recipient:
+                resolved_recipients.append(normalized_recipient)
+
+        if not resolved_recipients:
+            normalized_address = message.address.strip().lower()
+            if normalized_address:
+                resolved_recipients.append(normalized_address)
+
+        seen_recipients: set[str] = set()
+        for recipient in resolved_recipients:
+            if recipient in seen_recipients:
+                continue
+            seen_recipients.add(recipient)
+            for binding in self._match_mail_bindings_for_address(recipient):
+                mailbox = binding.mailbox
+                mailbox_id = id(mailbox)
+                if mailbox_id in seen_mailbox_ids:
+                    continue
+                seen_mailbox_ids.add(mailbox_id)
+                resolved_mailboxes.append(mailbox)
+
+        return tuple(resolved_mailboxes)
 
     def _broadcast_to_all(self, item: object) -> None:
         """Send one message to every client-level full listener."""
@@ -484,6 +546,7 @@ class Client:
     def _register_mail_binding(
         self,
         *,
+        mailbox: MailBox,
         mode: str,
         suffix: str,
         allow_overlap: bool,
@@ -498,6 +561,7 @@ class Client:
             mode=mode,
             suffix=suffix,
             allow_overlap=allow_overlap,
+            mailbox=mailbox,
             queue=listener_queue,
             prefix=prefix,
             compiled_pattern=compiled_pattern,
@@ -518,12 +582,20 @@ class Client:
 
         return listener_queue, _unregister
 
-    def _iterate_queue(self, listener_queue: queue.Queue[object], *, timeout: float = -1) -> Iterator[MailMessage]:
+    def _iterate_queue(
+        self,
+        listener_queue: queue.Queue[object],
+        *,
+        timeout: float = -1,
+        stop_when: Callable[[], bool] | None = None,
+    ) -> Iterator[MailMessage]:
         """Yield items from one local listener queue with total timeout control."""
 
         deadline = None if timeout < 0 else time.monotonic() + float(timeout)
 
         while not self._closed:
+            if stop_when is not None and stop_when():
+                return
             self._raise_fatal_error()
 
             remaining_seconds = _remaining_seconds(deadline)
@@ -535,6 +607,8 @@ class Client:
             try:
                 item = listener_queue.get(timeout=wait_timeout)
             except queue.Empty:
+                if stop_when is not None and stop_when():
+                    return
                 continue
 
             if item is _CLOSE_SENTINEL:
@@ -595,30 +669,15 @@ class MailBox:
         self.pattern = pattern_text
         self._compiled_pattern = compiled_pattern
         self.address = f"{self.prefix}@{self.suffix}" if self.prefix is not None else None
-        self._closed = False
 
-    def __enter__(self) -> "MailBox":
-        """Return the active mailbox binding helper."""
-
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        """Mark the logical mailbox binding as closed."""
-
-        self.close()
-
-    def close(self) -> None:
-        """Close the logical mailbox binding."""
-
-        self._closed = True
-
-    def listen(self, timeout: float = -1) -> Iterator[MailMessage]:
-        """Yield messages matching this mailbox binding from the shared client stream."""
-
-        if self._closed:
-            raise LinuxDoSpaceError("mailbox stream is already closed")
-
-        listener_queue, unregister = self._client._register_mail_binding(
+        # Explicit registration happens at mailbox creation time, not lazily in
+        # `listen()`. This makes the lifecycle easy to reason about:
+        #
+        # - `client.mail.bind(...)` registers immediately
+        # - `mail.close()` unregisters immediately
+        # - leaving `with` triggers `close()`, and therefore unregisters
+        self._listener_queue, self._unregister = self._client._register_mail_binding(
+            mailbox=self,
             mode=self.mode,
             suffix=self.suffix,
             allow_overlap=self.allow_overlap,
@@ -626,10 +685,109 @@ class MailBox:
             pattern_text=self.pattern,
             compiled_pattern=self._compiled_pattern,
         )
+        self._closed = False
+        self._listen_lock = threading.Lock()
+        self._is_listening = False
+
+    def __enter__(self) -> "MailBox":
+        """Return the active mailbox binding helper."""
+
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """Leave the context by explicitly unregistering this mailbox binding."""
+
+        self.close()
+
+    @property
+    def closed(self) -> bool:
+        """Report whether this mailbox binding has already been unregistered."""
+
+        return self._closed
+
+    def close(self) -> None:
+        """Unregister the logical mailbox binding and stop current listeners."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self._unregister()
+        self._listener_queue.put_nowait(_CLOSE_SENTINEL)
+
+    def listen(self, timeout: float = -1) -> Iterator[MailMessage]:
+        """Yield messages from the already-registered shared mailbox queue.
+
+        A single `MailBox` exposes one local queue. To keep message ownership
+        deterministic, one mailbox instance supports one active listener at a
+        time. If the caller needs parallel consumption, it should register
+        multiple mailbox bindings explicitly.
+        """
+
+        if self._closed:
+            raise LinuxDoSpaceError("mailbox stream is already closed")
+        with self._listen_lock:
+            if self._is_listening:
+                raise LinuxDoSpaceError("mailbox already has an active listener")
+            self._is_listening = True
         try:
-            yield from self._client._iterate_queue(listener_queue, timeout=timeout)
+            yield from self._client._iterate_queue(
+                self._listener_queue,
+                timeout=timeout,
+                stop_when=lambda: self._closed,
+            )
         finally:
-            unregister()
+            with self._listen_lock:
+                self._is_listening = False
+
+
+class MailBindingGroup:
+    """One closeable ordered group of explicitly registered mailbox bindings."""
+
+    def __init__(self, mailboxes: list[MailBox]) -> None:
+        """Store the mailbox bindings in the exact order they were created."""
+
+        self._mailboxes = mailboxes
+        self._closed = False
+
+    def __enter__(self) -> MailBindingGroup:
+        """Return the active group while preserving registered mailboxes."""
+
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """Close every mailbox in the group when leaving the context."""
+
+        self.close()
+
+    def __iter__(self) -> Iterator[MailBox]:
+        """Iterate over the contained mailboxes in creation order."""
+
+        return iter(self._mailboxes)
+
+    def __len__(self) -> int:
+        """Return how many mailbox bindings are in this group."""
+
+        return len(self._mailboxes)
+
+    def __getitem__(self, index: int) -> MailBox:
+        """Index into the ordered mailbox list for simple unpacking."""
+
+        return self._mailboxes[index]
+
+    @property
+    def closed(self) -> bool:
+        """Report whether this entire binding group has already been closed."""
+
+        return self._closed
+
+    def close(self) -> None:
+        """Close every mailbox binding in the group exactly once."""
+
+        if self._closed:
+            return
+        self._closed = True
+        for mailbox in self._mailboxes:
+            mailbox.close()
 
 
 class MailBindingFacade:
@@ -671,6 +829,46 @@ class MailBindingFacade:
             allow_overlap=allow_overlap,
         )
 
+    def unbind(self, *targets: MailBox | MailBindingGroup) -> None:
+        """Explicitly unregister one or more mailbox bindings or binding groups."""
+
+        for target in targets:
+            target.close()
+
+    def spec(
+        self,
+        *,
+        prefix: str | None = None,
+        pattern: str | re.Pattern[str] | None = None,
+        suffix: Suffix | str,
+        allow_overlap: bool = False,
+    ) -> MailBindingSpec:
+        """Create one ordered mailbox-binding spec for later batch registration."""
+
+        return MailBindingSpec(
+            suffix=suffix,
+            prefix=prefix,
+            pattern=pattern,
+            allow_overlap=allow_overlap,
+        )
+
+    def bind_many(self, *specs: MailBindingSpec) -> MailBindingGroup:
+        """Register multiple mailbox bindings in one ordered explicit step."""
+
+        if not specs:
+            raise ValueError("at least one MailBindingSpec must be provided")
+        return MailBindingGroup(
+            [
+                self.bind(
+                    prefix=spec.prefix,
+                    pattern=spec.pattern,
+                    suffix=spec.suffix,
+                    allow_overlap=spec.allow_overlap,
+                )
+                for spec in specs
+            ]
+        )
+
     def __call__(
         self,
         *,
@@ -702,6 +900,16 @@ class MailBindingFacade:
         """Build one regex-based catch-all mailbox helper explicitly."""
 
         return self.bind(pattern=pattern, suffix=suffix, allow_overlap=allow_overlap)
+
+    def route(self, message: MailMessage) -> tuple[MailBox, ...]:
+        """Resolve which active mailbox bindings would match one full-stream mail.
+
+        This is a read-only local routing helper meant for callers that consume
+        `client.listen(...)` and want to inspect the exact ordered mailbox
+        targets that the SDK's local binding chain would match.
+        """
+
+        return self._client._resolve_mailboxes_for_message(message)
 
 
 def _decode_stream_event(raw_line: bytes) -> _StreamEvent:
