@@ -598,9 +598,23 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.addCleanup(mailbox.close)
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
+        all_subjects: list[str] = []
+
+        def _consume_all() -> None:
+            for message in client.listen(timeout=0.4):
+                all_subjects.append(message.subject)
+
+        full_listener = threading.Thread(target=_consume_all)
+        full_listener.start()
+
         server.publish_mail(
             "alice@linuxdo.space",
             _raw_message("alice@linuxdo.space", "Before Listen", "early body"),
+        )
+        _wait_for(
+            lambda: all_subjects == ["Before Listen"],
+            timeout=2.0,
+            description="pre-listen full stream consumption",
         )
 
         late_subjects: list[str] = []
@@ -620,6 +634,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
 
         listener.join(timeout=2.0)
+        full_listener.join(timeout=2.0)
 
         self.assertEqual(late_subjects, ["After Listen"])
 
