@@ -25,7 +25,6 @@ python -m pip install linuxdospace
 如果你在当前仓库里本地开发 SDK，再使用可编辑安装：
 
 ```bash
-cd sdk/python
 python -m pip install -e .
 ```
 

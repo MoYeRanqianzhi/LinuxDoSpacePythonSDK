@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish, for example v0.3.0a2
+        required: true
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -27,6 +32,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -51,11 +59,10 @@ jobs:
           PY
 
       - name: Validate release tag version
-        if: ${{ github.event_name == 'push' }}
         shell: bash
         env:
           PACKAGE_VERSION: ${{ steps.package-metadata.outputs.package_version }}
-          GIT_TAG: ${{ github.ref_name }}
+          GIT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           expected_tag="v${PACKAGE_VERSION}"
           if [ "$GIT_TAG" != "$expected_tag" ]; then
