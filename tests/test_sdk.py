@@ -202,6 +202,49 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
 
+    def test_bind_many_rolls_back_if_any_spec_is_invalid(self) -> None:
+        """A failed batch bind should not leave earlier mailbox bindings behind."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        with self.assertRaisesRegex(ValueError, "pattern must not be empty"):
+            client.mail.bind_many(
+                client.mail.spec(prefix="alice", suffix=Suffix.linuxdo_space),
+                client.mail.spec(pattern="", suffix=Suffix.linuxdo_space),
+            )
+
+        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+
+    def test_client_close_closes_registered_mailboxes(self) -> None:
+        """Closing the client should mark bound mailboxes closed and unroutable."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), (mailbox,))
+
+        client.close()
+
+        self.assertTrue(mailbox.closed)
+        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+        with self.assertRaisesRegex(LinuxDoSpaceError, "client is already closed"):
+            client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space)
+
     def test_full_listener_and_mailbox_listeners_can_run_together(self) -> None:
         """The full listener and filtered mailbox listeners should share one upstream stream."""
 
@@ -331,6 +374,31 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         self.assertEqual(len(collected), 1)
         self.assertEqual(client.mail.route(collected[0]), (pattern_mailbox, exact_mailbox))
+
+    def test_route_uses_message_address_instead_of_all_recipients(self) -> None:
+        """Routing should follow the current message instance address only."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        alice_mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        bob_mailbox = client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space)
+        self.addCleanup(alice_mailbox.close)
+        self.addCleanup(bob_mailbox.close)
+
+        multi_recipient_message = _sdk_message(
+            "alice@linuxdo.space",
+            recipients=("alice@linuxdo.space", "bob@linuxdo.space"),
+        )
+
+        self.assertEqual(client.mail.route(multi_recipient_message), (alice_mailbox,))
 
     def test_allow_overlap_continues_to_later_bindings(self) -> None:
         """A matching binding with allow_overlap should let later bindings receive the message too."""
@@ -478,6 +546,46 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(received_subjects[0], "Burst 0")
         self.assertEqual(received_subjects[-1], "Burst 49")
         self.assertEqual(server.request_count, 1)
+
+    def test_mailbox_does_not_backfill_messages_sent_before_listen_starts(self) -> None:
+        """Binding registration alone should not create a growing pre-listen backlog."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(mailbox.close)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "Before Listen", "early body"),
+        )
+
+        late_subjects: list[str] = []
+
+        def _consume() -> None:
+            for message in mailbox.listen(timeout=0.4):
+                late_subjects.append(message.subject)
+
+        listener = threading.Thread(target=_consume)
+        listener.start()
+        time.sleep(0.05)
+
+        server.publish_mail(
+            "alice@linuxdo.space",
+            _raw_message("alice@linuxdo.space", "After Listen", "late body"),
+        )
+
+        listener.join(timeout=2.0)
+
+        self.assertEqual(late_subjects, ["After Listen"])
 
     def test_one_mailbox_rejects_multiple_concurrent_listeners(self) -> None:
         """A single mailbox instance should not split one queue across multiple listeners."""
@@ -690,17 +798,18 @@ def _raw_message(recipient: str, subject: str, body: str) -> bytes:
     ).encode("utf-8")
 
 
-def _sdk_message(address: str) -> MailMessage:
+def _sdk_message(address: str, *, recipients: tuple[str, ...] | None = None) -> MailMessage:
     """Build one minimal public SDK message object for routing-only tests."""
 
     message = EmailMessage()
     message["From"] = "sender@example.com"
     message["To"] = address
     message["Subject"] = "Probe"
+    resolved_recipients = recipients or (address,)
     return MailMessage(
         address=address,
         sender="sender@example.com",
-        recipients=(address,),
+        recipients=resolved_recipients,
         received_at=datetime(2026, 3, 20, 10, 11, 12, tzinfo=timezone.utc),
         subject="Probe",
         message_id=None,
@@ -710,7 +819,7 @@ def _sdk_message(address: str) -> MailMessage:
         cc_header="",
         reply_to_header="",
         from_addresses=("sender@example.com",),
-        to_addresses=(address,),
+        to_addresses=resolved_recipients,
         cc_addresses=(),
         reply_to_addresses=(),
         text="probe",

@@ -80,7 +80,7 @@ with Client(token="你的 API Token") as client:
             print("alice", item.subject)
 ```
 
-多个邮箱可以并行复用同一个 `Client`：
+多个邮箱可以复用同一个 `Client`：
 
 ```python
 from LinuxDoSpace import Client, Suffix
@@ -141,7 +141,8 @@ with Client(token="你的 API Token") as client:
                 print(item.address, [mailbox.address or mailbox.pattern for mailbox in matched])
 ```
 
-`client.mail.route(item)` 不会重复投递，只会按当前的本地有序匹配链给出“这封邮件会命中哪些子绑定”的结果。
+`client.mail.route(item)` 只会基于这条 `MailMessage` 当前的 `item.address` 做匹配，不会把整封原始多收件人事件重新展开。  
+它返回的是“当前时刻的本地匹配结果”，不是对过去已经发生的队列投递做历史回放。
 
 ## 异常处理
 
@@ -168,10 +169,11 @@ except LinuxDoSpaceError as exc:
 - `client.listen(timeout=-1)` 是最核心的“全量接收”接口
 - `client.mail.bind(...)` 在创建时就会立即注册本地绑定
 - `mail.close()` 会立即解绑；离开 `with` 作用域也会立即解绑
+- `bind(...)` 不会为尚未开始 `listen()` 的 mailbox 悄悄积压历史消息
 - `client.mail.bind(prefix=..., suffix=...).listen(...)` 是精确邮箱绑定
 - `client.mail.bind(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
 - `client.mail.bind_many(...)` 可以一次注册多条有序绑定
-- `client.mail.route(message)` 可以查看全量消息会命中哪些本地子绑定
+- `client.mail.route(message)` 只查看这条消息当前 `address` 会命中哪些本地子绑定
 - `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
 - `Suffix` 是一个专门的枚举类型，避免把后缀写成普通字符串
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
@@ -185,8 +187,8 @@ except LinuxDoSpaceError as exc:
 - 客户端内部会根据邮件中的收件地址，在本地内存里完成筛选和分发
 - 因此多个 `mail.bind()` 绑定不会增加服务端的上游连接数
 - `client.listen(...)` 负责完整接收
-- `client.mail.route(...)` 负责说明全量消息在本地会落到哪些子绑定
-- `mail.listen(...)` 负责消费某一个已经注册完成的本地子队列
+- `client.mail.route(...)` 负责说明当前这条消息的 `address` 在本地会落到哪些子绑定
+- `mail.listen(...)` 负责消费某一个已经注册完成、且当前处于监听状态的本地子队列
 
 ## 匹配规则
 
