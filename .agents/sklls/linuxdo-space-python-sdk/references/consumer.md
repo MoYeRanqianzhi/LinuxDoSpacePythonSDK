@@ -46,6 +46,7 @@ the SDK itself.
 - One `Client` opens one upstream HTTPS stream immediately.
 - `client.listen(...)` gives full-token intake.
 - `client.mail.bind(...)` creates local mailbox matching rules.
+- `Suffix.linuxdo_space` resolves to `<owner_username>.linuxdo.space`.
 - A mailbox starts receiving only while `mail.listen(...)` is active.
 - `client.mail.route(message)` is a read-only helper for the current
   `message.address`; it is not queue history replay.

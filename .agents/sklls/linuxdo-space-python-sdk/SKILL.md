@@ -22,6 +22,7 @@ Read [references/development.md](references/development.md) only when editing th
    - one `Client` owns one upstream HTTPS stream
    - remote `base_url` must use `https://`; only localhost may use `http://`
    - `client.listen(...)` is the canonical full-intake interface
+   - `Suffix.linuxdo_space` is semantic and resolves to `<owner_username>.linuxdo.space`
    - exact and regex bindings share one ordered matching chain per suffix
    - `allow_overlap=False` stops at the first match; `allow_overlap=True` continues
    - `bind(...)` registers matching metadata immediately

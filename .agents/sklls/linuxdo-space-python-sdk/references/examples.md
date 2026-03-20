@@ -35,6 +35,8 @@ except LinuxDoSpaceError:
     ...
 ```
 
+`Suffix.linuxdo_space` 在运行时会被解析成 `<owner_username>.linuxdo.space`。
+
 ## 2. Add or Change a Public API
 
 Use this when changing constructor args, public methods, public exports, public

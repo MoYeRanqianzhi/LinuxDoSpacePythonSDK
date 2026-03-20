@@ -195,6 +195,7 @@ class Client:
         self._listeners_lock = threading.Lock()
         self._all_listeners: list[queue.Queue[object]] = []
         self._mail_bindings_by_suffix: dict[str, list[_MailBinding]] = {}
+        self._owner_username: str | None = None
 
         self._initial_connect_event = threading.Event()
         self._initial_connect_error: LinuxDoSpaceError | None = None
@@ -314,9 +315,7 @@ class Client:
     ) -> dict[str, Any]:
         """Validate and normalize one mailbox binding without registering it."""
 
-        normalized_suffix = str(suffix).strip().lower()
-        if not normalized_suffix:
-            raise ValueError("suffix must not be empty")
+        normalized_suffix = self._resolve_binding_suffix(suffix)
         if (prefix is None) == (pattern is None):
             raise ValueError("exactly one of prefix or pattern must be provided")
 
@@ -341,6 +340,30 @@ class Client:
             "pattern_text": _normalize_pattern_text(pattern),
             "compiled_pattern": _compile_pattern(pattern),
         }
+
+    def _resolve_binding_suffix(self, suffix: Suffix | str) -> str:
+        """Resolve one public suffix input into the concrete mailbox suffix.
+
+        `Suffix.linuxdo_space` is intentionally semantic rather than literal:
+        it maps to the current token owner's namespace suffix
+        `<username>.linuxdo.space`.
+
+        Plain strings remain literal mailbox suffixes for callers who need
+        direct control over the exact routed domain.
+        """
+
+        if isinstance(suffix, Suffix) and suffix is Suffix.linuxdo_space:
+            owner_username = (self._owner_username or "").strip().lower()
+            if not owner_username:
+                raise StreamError(
+                    "stream bootstrap did not provide owner_username required to resolve Suffix.linuxdo_space"
+                )
+            return f"{owner_username}.{suffix.value}".strip().lower()
+
+        normalized_suffix = str(suffix).strip().lower()
+        if not normalized_suffix:
+            raise ValueError("suffix must not be empty")
+        return normalized_suffix
 
     def _create_mailbox_from_normalized(self, normalized_binding: dict[str, Any]) -> "MailBox":
         """Construct and register one mailbox from already-validated binding data."""
@@ -435,8 +458,6 @@ class Client:
                     raise StreamError(f"unexpected stream status code: {status_code}")
 
                 self._connected = True
-                if not self._initial_connect_event.is_set():
-                    self._initial_connect_event.set()
 
                 _set_stream_response_timeout(response, self._stream_socket_timeout)
 
@@ -450,7 +471,10 @@ class Client:
                         continue
 
                     event = _decode_stream_event(stripped_line)
-                    if event.type in {_READY_EVENT_TYPE, _HEARTBEAT_EVENT_TYPE}:
+                    if event.type == _READY_EVENT_TYPE:
+                        self._handle_ready_event(event)
+                        continue
+                    if event.type == _HEARTBEAT_EVENT_TYPE:
                         continue
                     if event.type != _MAIL_EVENT_TYPE:
                         continue
@@ -469,6 +493,17 @@ class Client:
         finally:
             with self._active_response_lock:
                 self._active_response = None
+
+    def _handle_ready_event(self, event: _StreamEvent) -> None:
+        """Persist the stream bootstrap identity required by suffix enums."""
+
+        owner_username = str(event.payload.get("owner_username", "")).strip().lower()
+        if not owner_username:
+            raise StreamError("LinuxDoSpace ready event did not include owner_username")
+
+        self._owner_username = owner_username
+        if not self._initial_connect_event.is_set():
+            self._initial_connect_event.set()
 
     def _dispatch_parsed_envelope(self, parsed_envelope: _ParsedMailEnvelope) -> None:
         """Fan out one parsed event to the full listener and mailbox bindings."""

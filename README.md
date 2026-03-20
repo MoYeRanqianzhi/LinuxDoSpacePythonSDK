@@ -30,6 +30,12 @@ python -m pip install -e .
 
 ## 快速开始
 
+关于 `Suffix.linuxdo_space`：
+
+- 它是语义后缀，不是字面父域名
+- SDK 会在 `ready.owner_username` 到达后，把它解析成 `<owner_username>.linuxdo.space`
+- 如果你需要字面自定义后缀，请直接传普通字符串
+
 ```python
 from LinuxDoSpace import Client, Suffix
 
@@ -186,7 +192,7 @@ except LinuxDoSpaceError as exc:
 - `client.mail.bind_many(...)` 可以一次注册多条有序绑定
 - `client.mail.route(message)` 只查看这条消息当前 `address` 会命中哪些本地子绑定
 - `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
-- `Suffix` 是一个专门的枚举类型，避免把后缀写成普通字符串
+- `Suffix.linuxdo_space` 会解析成 `<owner_username>.linuxdo.space`
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
 - 如果 `timeout` 为正数，则表示本次监听的最长总时长（秒）
 - 返回对象会尽量把常用信息都变成属性，方便 IDE 自动补全
@@ -215,7 +221,7 @@ except LinuxDoSpaceError as exc:
 示例：
 
 - 如果先创建 `pattern=r".*"`，后创建 `prefix="alice"`，而第一个绑定没有开启 `allow_overlap`
-  那么 `alice@linuxdo.space` 会先命中 `.*`，并在那里停止，后面的精确绑定不会收到
+  那么 `alice@<owner_username>.linuxdo.space` 会先命中 `.*`，并在那里停止，后面的精确绑定不会收到
 - 如果先创建 `pattern=r".*"`, 且它设置了 `allow_overlap=True`
   后面创建的 `prefix="alice"` 也能继续收到
 

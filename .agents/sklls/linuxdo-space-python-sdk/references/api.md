@@ -226,7 +226,7 @@ client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
 client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
 ```
 
-- `alice@linuxdo.space` matches both bindings, in that order.
+- `alice@<owner_username>.linuxdo.space` matches both bindings, in that order.
 
 ## `MailBox`
 
@@ -337,7 +337,11 @@ Current enum members:
 Suffix.linuxdo_space
 ```
 
-It is a `str` enum, so `str(Suffix.linuxdo_space) == "linuxdo.space"`.
+It is a semantic first-party suffix enum.
+
+- `str(Suffix.linuxdo_space) == "linuxdo.space"` remains true
+- mailbox binding resolution expands it to `<owner_username>.linuxdo.space`
+- plain `str` suffix inputs still stay literal
 
 ## Exceptions
 

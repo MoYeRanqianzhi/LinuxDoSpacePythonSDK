@@ -17,6 +17,9 @@ from typing import Callable
 from LinuxDoSpace import Client, LinuxDoSpaceError, Suffix
 from LinuxDoSpace.models import MailMessage
 
+TEST_OWNER_USERNAME = "testuser"
+TEST_NAMESPACE_SUFFIX = f"{TEST_OWNER_USERNAME}.linuxdo.space"
+
 
 class LinuxDoSpaceSDKTests(unittest.TestCase):
     """Validate the single-stream shared-client architecture end to end."""
@@ -44,6 +47,22 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(server.request_count, 1)
         self.assertTrue(client.connected)
 
+    def test_literal_string_suffix_remains_literal(self) -> None:
+        """Plain string suffixes should stay literal mailbox domains."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix="linuxdo.space")
+        self.assertEqual(mailbox.address, "alice@linuxdo.space")
+
     def test_client_listen_receives_all_messages(self) -> None:
         """The full client-level listener should expose every message received by the token."""
 
@@ -69,12 +88,12 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Alice Mail", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Alice Mail", "alice body"),
         )
         server.publish_mail(
-            "bob@linuxdo.space",
-            _raw_message("bob@linuxdo.space", "Bob Mail", "bob body"),
+            "bob@testuser.linuxdo.space",
+            _raw_message("bob@testuser.linuxdo.space", "Bob Mail", "bob body"),
         )
 
         listener.join(timeout=2.0)
@@ -82,8 +101,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertEqual(
             collected,
             [
-                ("alice@linuxdo.space", "Alice Mail"),
-                ("bob@linuxdo.space", "Bob Mail"),
+                ("alice@testuser.linuxdo.space", "Alice Mail"),
+                ("bob@testuser.linuxdo.space", "Bob Mail"),
             ],
         )
         self.assertEqual(server.request_count, 1)
@@ -126,16 +145,16 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Alice Mail", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Alice Mail", "alice body"),
         )
         server.publish_mail(
-            "bob@linuxdo.space",
-            _raw_message("bob@linuxdo.space", "Bob Mail", "bob body"),
+            "bob@testuser.linuxdo.space",
+            _raw_message("bob@testuser.linuxdo.space", "Bob Mail", "bob body"),
         )
         server.publish_mail(
-            "carol@linuxdo.space",
-            _raw_message("carol@linuxdo.space", "Carol Mail", "carol body"),
+            "carol@testuser.linuxdo.space",
+            _raw_message("carol@testuser.linuxdo.space", "Carol Mail", "carol body"),
         )
 
         for listener in listeners:
@@ -161,7 +180,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
         self.addCleanup(client.close)
 
-        probe_message = _sdk_message("alice@linuxdo.space")
+        probe_message = _sdk_message("alice@testuser.linuxdo.space")
 
         with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
             matched = client.mail.route(probe_message)
@@ -184,7 +203,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
         self.addCleanup(client.close)
 
-        probe_message = _sdk_message("alice@linuxdo.space")
+        probe_message = _sdk_message("alice@testuser.linuxdo.space")
         mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
 
         self.assertEqual(client.mail.route(probe_message), (mailbox,))
@@ -210,10 +229,10 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
             client.mail.spec(prefix="alice", suffix=Suffix.linuxdo_space),
         ) as bindings:
             self.assertEqual(len(bindings), 2)
-            matched = client.mail.route(_sdk_message("alice@linuxdo.space"))
+            matched = client.mail.route(_sdk_message("alice@testuser.linuxdo.space"))
             self.assertEqual(matched, (bindings[0], bindings[1]))
 
-        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+        self.assertEqual(client.mail.route(_sdk_message("alice@testuser.linuxdo.space")), ())
 
     def test_bind_many_rolls_back_if_any_spec_is_invalid(self) -> None:
         """A failed batch bind should not leave earlier mailbox bindings behind."""
@@ -234,7 +253,7 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
                 client.mail.spec(pattern="", suffix=Suffix.linuxdo_space),
             )
 
-        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+        self.assertEqual(client.mail.route(_sdk_message("alice@testuser.linuxdo.space")), ())
 
     def test_client_close_closes_registered_mailboxes(self) -> None:
         """Closing the client should mark bound mailboxes closed and unroutable."""
@@ -249,12 +268,12 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         )
 
         mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
-        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), (mailbox,))
+        self.assertEqual(client.mail.route(_sdk_message("alice@testuser.linuxdo.space")), (mailbox,))
 
         client.close()
 
         self.assertTrue(mailbox.closed)
-        self.assertEqual(client.mail.route(_sdk_message("alice@linuxdo.space")), ())
+        self.assertEqual(client.mail.route(_sdk_message("alice@testuser.linuxdo.space")), ())
         with self.assertRaisesRegex(LinuxDoSpaceError, "client is already closed"):
             client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space)
 
@@ -293,12 +312,12 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Alice Shared", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Alice Shared", "alice body"),
         )
         server.publish_mail(
-            "bob@linuxdo.space",
-            _raw_message("bob@linuxdo.space", "Bob Shared", "bob body"),
+            "bob@testuser.linuxdo.space",
+            _raw_message("bob@testuser.linuxdo.space", "Bob Shared", "bob body"),
         )
 
         all_listener.join(timeout=2.0)
@@ -345,8 +364,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Ordered Match", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Ordered Match", "alice body"),
         )
 
         pattern_listener.join(timeout=2.0)
@@ -386,8 +405,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Route Mirror", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Route Mirror", "alice body"),
         )
 
         listener.join(timeout=2.0)
@@ -414,8 +433,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.addCleanup(bob_mailbox.close)
 
         multi_recipient_message = _sdk_message(
-            "alice@linuxdo.space",
-            recipients=("alice@linuxdo.space", "bob@linuxdo.space"),
+            "alice@testuser.linuxdo.space",
+            recipients=("alice@testuser.linuxdo.space", "bob@testuser.linuxdo.space"),
         )
 
         self.assertEqual(client.mail.route(multi_recipient_message), (alice_mailbox,))
@@ -469,8 +488,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Overlap Match", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Overlap Match", "alice body"),
         )
 
         first_listener.join(timeout=2.0)
@@ -530,8 +549,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "All Receive", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "All Receive", "alice body"),
         )
 
         first_listener.join(timeout=2.0)
@@ -570,8 +589,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
 
         for index in range(50):
             server.publish_mail(
-                "alice@linuxdo.space",
-                _raw_message("alice@linuxdo.space", f"Burst {index}", f"body {index}"),
+                "alice@testuser.linuxdo.space",
+                _raw_message("alice@testuser.linuxdo.space", f"Burst {index}", f"body {index}"),
             )
 
         listener.join(timeout=2.0)
@@ -608,8 +627,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         full_listener.start()
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Before Listen", "early body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Before Listen", "early body"),
         )
         _wait_for(
             lambda: all_subjects == ["Before Listen"],
@@ -629,8 +648,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "After Listen", "late body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "After Listen", "late body"),
         )
 
         listener.join(timeout=2.0)
@@ -709,8 +728,8 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         self.assertTrue(server.wait_for_subscribers(1, timeout=2.0))
 
         server.publish_mail(
-            "alice@linuxdo.space",
-            _raw_message("alice@linuxdo.space", "Sugar Match", "alice body"),
+            "alice@testuser.linuxdo.space",
+            _raw_message("alice@testuser.linuxdo.space", "Sugar Match", "alice body"),
         )
 
         explicit_listener.join(timeout=2.0)
@@ -738,7 +757,15 @@ class _StreamingRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            self.wfile.write(_event_line({"type": "ready", "token_public_id": "tok123"}))
+            self.wfile.write(
+                _event_line(
+                    {
+                        "type": "ready",
+                        "token_public_id": "tok123",
+                        "owner_username": TEST_OWNER_USERNAME,
+                    }
+                )
+            )
             self.wfile.flush()
         except OSError:
             return
