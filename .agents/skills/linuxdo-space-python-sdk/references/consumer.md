@@ -48,8 +48,12 @@ the SDK itself.
 - `client.mail.bind(...)` creates local mailbox matching rules.
 - `Suffix.linuxdo_space` resolves to `<owner_username>.linuxdo.space`.
 - A mailbox starts receiving only while `mail.listen(...)` is active.
+- Positive `timeout` values on both `client.listen(...)` and `mail.listen(...)` mean total wall-clock time, not idle timeout.
 - `client.mail.route(message)` is a read-only helper for the current
   `message.address`; it is not queue history replay.
+- `client.listen(...)` yields one projected `MailMessage` per upstream event,
+  while `mail.listen(...)` yields one projected `MailMessage` per matched
+  recipient address.
 
 ## Preferred Usage Patterns
 
@@ -111,6 +115,26 @@ with Client(token="...") as client:
             print(item.address, matches)
 ```
 
+### Multiple Mailboxes On One Client
+
+If more than one mailbox binding must stay active, keep them active at the same
+time and route from the full stream. Do not treat sequential mailbox listeners
+as parallel consumption.
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="...") as client:
+    with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
+        with client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space) as bob:
+            for item in client.listen(timeout=60):
+                for mailbox in client.mail.route(item):
+                    if mailbox is alice:
+                        print("alice", item.subject)
+                    elif mailbox is bob:
+                        print("bob", item.subject)
+```
+
 ## Matching Rules
 
 - `prefix` and `pattern` are mutually exclusive.
@@ -148,5 +172,6 @@ Do not:
 
 - open a new `Client` per mailbox
 - assume `bind(...)` backfills mail before `listen()`
+- assume sequential `alice.listen(...)` / `bob.listen(...)` calls keep both queues active
 - treat `route(message)` as message replay
 - rely on internal modules in normal application code

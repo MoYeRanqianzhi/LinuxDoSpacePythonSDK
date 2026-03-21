@@ -4,11 +4,13 @@ Use this file for change workflow, validation, and update boundaries.
 
 ## Workdir
 
-Run SDK commands in:
+Run SDK commands in the Python SDK root:
 
 ```bash
 cd sdk/python
 ```
+
+From this `references/development.md` file, that same SDK root is `../../../../`.
 
 ## Required Validation
 
@@ -33,7 +35,7 @@ GitHub workflow file:
 Release trigger:
 
 - push tag `v<package-version>`
-- example for current version `0.3.0a1`: `v0.3.0a1`
+- example for current version `0.3.0a3`: `v0.3.0a3`
 
 Workflow behavior:
 
@@ -55,19 +57,19 @@ PyPI Trusted Publishing fields to configure on PyPI:
 
 When public behavior changes, keep these files aligned:
 
-- `../../../LinuxDoSpace/__init__.py`
+- `../../../../LinuxDoSpace/__init__.py`
   - public exports
-- `../../../LinuxDoSpace/client.py`
+- `../../../../LinuxDoSpace/client.py`
   - implementation and lifecycle semantics
-- `../../../LinuxDoSpace/enums.py`
+- `../../../../LinuxDoSpace/enums.py`
   - public enum surface
-- `../../../LinuxDoSpace/exceptions.py`
+- `../../../../LinuxDoSpace/exceptions.py`
   - public error surface
-- `../../../LinuxDoSpace/models.py`
+- `../../../../LinuxDoSpace/models.py`
   - public typed models
-- `../../../README.md`
+- `../../../../README.md`
   - package usage and documented semantics
-- `../../../tests/test_sdk.py`
+- `../../../../tests/test_sdk.py`
   - integration coverage for the changed behavior
 
 ## Preferred Documentation Style
@@ -80,10 +82,10 @@ When public behavior changes, keep these files aligned:
 ## Preferred Change Strategy
 
 1. Read `references/api.md`.
-2. Inspect the current implementation in `../../../LinuxDoSpace/client.py`.
+2. Inspect the current implementation in `../../../../LinuxDoSpace/client.py`.
 3. Add or update tests first when the change affects observable behavior.
 4. Implement the code change.
-5. Update `../../../README.md`.
+5. Update `../../../../README.md`.
 6. Run both validation commands.
 
 ## High-Risk Areas

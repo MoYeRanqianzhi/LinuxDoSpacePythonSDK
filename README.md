@@ -105,11 +105,17 @@ from LinuxDoSpace import Client, Suffix
 with Client(token="你的 API Token") as client:
     with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as alice:
         with client.mail.bind(prefix="bob", suffix=Suffix.linuxdo_space) as bob:
-            for item in alice.listen(timeout=60):
-                print("alice", item.subject)
-            for item in bob.listen(timeout=60):
-                print("bob", item.subject)
+            for item in client.listen(timeout=60):
+                for mailbox in client.mail.route(item):
+                    if mailbox is alice:
+                        print("alice", item.subject)
+                    elif mailbox is bob:
+                        print("bob", item.subject)
 ```
+
+如果你确实要消费多个 mailbox 自己的本地队列，就需要让这些
+`mail.listen(...)` 同时处于活动状态，例如放到不同线程或任务里。
+顺序调用 `alice.listen(...)` 再 `bob.listen(...)` 并不等于并行监听。
 
 正则绑定也可以直接使用：
 
@@ -161,6 +167,13 @@ with Client(token="你的 API Token") as client:
 `client.mail.route(item)` 只会基于这条 `MailMessage` 当前的 `item.address` 做匹配，不会把整封原始多收件人事件重新展开。  
 它返回的是“当前时刻的本地匹配结果”，不是对过去已经发生的队列投递做历史回放。
 
+还需要注意一件事：
+
+- `client.listen(...)` 是完整流视角，每个上游事件只会向你暴露一条 `MailMessage`
+- 这条 `MailMessage.address` 是当前事件的投影地址
+- 原始完整收件人列表仍然保留在 `item.recipients`
+- `mail.listen(...)` 则是 mailbox 视角，会针对每个命中的收件地址分别投递
+
 ## 异常处理
 
 ```python
@@ -184,6 +197,7 @@ except LinuxDoSpaceError as exc:
 - 一个 `Client` 始终只维护一条到 `/v1/token/email/stream` 的真实连接
 - `Client` 会统一接收、统一解析、统一分发收到的所有邮件事件
 - `client.listen(timeout=-1)` 是最核心的“全量接收”接口
+- `client.listen(...)` 与 `mail.listen(...)` 的正数 `timeout` 都表示该迭代器的最长总时长，不是空闲超时
 - `client.mail.bind(...)` 在创建时就会立即注册本地绑定
 - `mail.close()` 会立即解绑；离开 `with` 作用域也会立即解绑
 - `bind(...)` 不会为尚未开始 `listen()` 的 mailbox 悄悄积压历史消息
@@ -191,6 +205,8 @@ except LinuxDoSpaceError as exc:
 - `client.mail.bind(pattern=..., suffix=...).listen(...)` 是正则邮箱绑定
 - `client.mail.bind_many(...)` 可以一次注册多条有序绑定
 - `client.mail.route(message)` 只查看这条消息当前 `address` 会命中哪些本地子绑定
+- `client.listen(...)` 每次返回一条上游事件投影，`message.address` 是当前投影地址，`message.recipients` 保留完整原始收件人列表
+- `mail.listen(...)` 每次返回一条命中 mailbox 的收件地址投影，因此它看到的 `message.address` 可以和全量流视角不同
 - `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
 - `Suffix.linuxdo_space` 会解析成 `<owner_username>.linuxdo.space`
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件

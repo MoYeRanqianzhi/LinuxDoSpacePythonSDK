@@ -16,17 +16,21 @@ Read [references/development.md](references/development.md) only when editing th
    - the current PyPI install command is `pip install linuxdospace`
    - `python -m pip install linuxdospace` is also acceptable when the environment requires an explicit interpreter
    - import only from `LinuxDoSpace`
-2. For local repository work, the SDK root is `../../../`.
+2. For local repository work:
+   - the SDK root relative to this `SKILL.md` is `../../../`
+   - from the parent repository root, the SDK path is `sdk/python`
 3. Prefer explicit examples with `client.mail.bind(...)`. Only use `client.mail(...)` when intentionally documenting syntax sugar.
 4. Preserve these user-facing invariants:
    - one `Client` owns one upstream HTTPS stream
    - remote `base_url` must use `https://`; only localhost may use `http://`
    - `client.listen(...)` is the canonical full-intake interface
+   - positive `timeout` values on both `client.listen(...)` and `mail.listen(...)` mean total wall-clock time for that iterator, not idle timeout
    - `Suffix.linuxdo_space` is semantic and resolves to `<owner_username>.linuxdo.space`
    - exact and regex bindings share one ordered matching chain per suffix
    - `allow_overlap=False` stops at the first match; `allow_overlap=True` continues
    - `bind(...)` registers matching metadata immediately
    - mailbox queues activate only during `mail.listen(...)`; there is no pre-listen backlog
+   - full-intake `MailMessage.address` is the current event projection address, while mailbox listeners receive one projection per matched recipient
    - leaving `with` or calling `close()` unbinds immediately
    - one `MailBox` allows only one active listener
    - `bind_many(...)` is transactional: partial success must roll back

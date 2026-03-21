@@ -45,10 +45,10 @@ dataclasses, or documented semantics.
 Checklist:
 
 1. Read `api.md`.
-2. Edit the implementation under `../../../LinuxDoSpace/`.
-3. Update `../../../LinuxDoSpace/__init__.py` if the export surface changes.
-4. Add or update integration tests in `../../../tests/test_sdk.py`.
-5. Update `../../../README.md` examples and behavior notes.
+2. Edit the implementation under `../../../../LinuxDoSpace/`.
+3. Update `../../../../LinuxDoSpace/__init__.py` if the export surface changes.
+4. Add or update integration tests in `../../../../tests/test_sdk.py`.
+5. Update `../../../../README.md` examples and behavior notes.
 6. Run:
 
 ```bash
@@ -58,10 +58,10 @@ python -m pip install -e .
 
 Typical patch set:
 
-- `../../../LinuxDoSpace/client.py`
-- `../../../LinuxDoSpace/__init__.py`
-- `../../../tests/test_sdk.py`
-- `../../../README.md`
+- `../../../../LinuxDoSpace/client.py`
+- `../../../../LinuxDoSpace/__init__.py`
+- `../../../../tests/test_sdk.py`
+- `../../../../README.md`
 
 ## 3. Fix Lifecycle or Queue Bugs
 
@@ -74,8 +74,8 @@ Use this for:
 
 Focus files:
 
-- `../../../LinuxDoSpace/client.py`
-- `../../../tests/test_sdk.py`
+- `../../../../LinuxDoSpace/client.py`
+- `../../../../tests/test_sdk.py`
 
 Required assertions to preserve:
 
@@ -101,7 +101,7 @@ Use this when supporting another managed email suffix.
 
 Checklist:
 
-1. Update `../../../LinuxDoSpace/enums.py`.
+1. Update `../../../../LinuxDoSpace/enums.py`.
 2. Add at least one test that uses the new suffix.
 3. Update README examples or suffix documentation if user-facing.
 
@@ -111,6 +111,9 @@ Minimal patch shape:
 class Suffix(str, Enum):
     linuxdo_space = "linuxdo.space"
     example_com = "example.com"
+
+    def __str__(self) -> str:
+        return self.value
 ```
 
 Do not add a suffix only in README. Keep enum, tests, and docs aligned.
@@ -122,8 +125,8 @@ exception types for internal convenience only.
 
 Checklist:
 
-1. Update `../../../LinuxDoSpace/exceptions.py`.
-2. Export it from `../../../LinuxDoSpace/__init__.py`.
+1. Update `../../../../LinuxDoSpace/exceptions.py`.
+2. Export it from `../../../../LinuxDoSpace/__init__.py`.
 3. Raise it from implementation code.
 4. Add tests that assert the public exception type.
 5. Update README exception-handling examples if relevant.
@@ -134,9 +137,9 @@ Use this when exposing more parsed mail metadata.
 
 Checklist:
 
-1. Update `../../../LinuxDoSpace/models.py`.
-2. Update envelope construction in `../../../LinuxDoSpace/client.py`.
-3. Add integration coverage in `../../../tests/test_sdk.py`.
+1. Update `../../../../LinuxDoSpace/models.py`.
+2. Update envelope construction in `../../../../LinuxDoSpace/client.py`.
+3. Add integration coverage in `../../../../tests/test_sdk.py`.
 4. Add the field to the README's public-attributes section.
 
 Never add a field to the dataclass without wiring it into the parser path.
@@ -179,6 +182,7 @@ Rules:
 - If documenting `route(message)`, say it matches only `message.address`.
 - Do not imply hidden buffering before `listen()` starts.
 - Do not call sequential consumption “parallel”.
+- If documenting `timeout`, say positive values are total wall-clock time for that iterator.
 
 ## 8. Add a Regression Test for Matching Order
 

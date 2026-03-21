@@ -10,11 +10,11 @@ Install/import naming:
 
 ## Paths
 
-- Package root: `../../../LinuxDoSpace`
-- Public exports: `../../../LinuxDoSpace/__init__.py`
-- Package README: `../../../README.md`
-- Integration tests: `../../../tests/test_sdk.py`
-- Packaging metadata: `../../../pyproject.toml`
+- Package root: `../../../../LinuxDoSpace`
+- Public exports: `../../../../LinuxDoSpace/__init__.py`
+- Package README: `../../../../README.md`
+- Integration tests: `../../../../tests/test_sdk.py`
+- Packaging metadata: `../../../../pyproject.toml`
 
 ## Public Imports
 
@@ -90,6 +90,10 @@ with Client(token="...") as client:
 - Yields every mail event exposed by the token stream.
 - `timeout < 0` means unbounded total listen time.
 - Positive `timeout` means total wall-clock time for this iterator.
+- Each yielded `MailMessage` is one projection of the current upstream mail
+  event. In the full-intake path, `message.address` is the primary projection
+  address for that event, while `message.recipients` preserves the full
+  recipient tuple.
 
 #### `client.close() -> None`
 
@@ -261,6 +265,12 @@ with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
 - Messages sent before `listen()` starts are not backfilled.
 - One `MailBox` supports only one active listener at a time.
 - If a second concurrent listener starts, `LinuxDoSpaceError` is raised.
+- `timeout < 0` means unbounded total listen time for this iterator.
+- Positive `timeout` means total wall-clock time for this iterator.
+- `timeout=0` returns immediately.
+- Each yielded `MailMessage` is one matched-recipient projection, so mailbox
+  listeners can see a different `message.address` projection from the
+  corresponding full-intake event.
 
 #### `mailbox.close() -> None`
 
@@ -328,6 +338,13 @@ Fields:
 - `raw: str`
 - `raw_bytes: bytes`
 - `message: EmailMessage`
+
+Address interpretation depends on the intake path:
+
+- In `client.listen(...)`, `address` is the primary projection address for the
+  current upstream event.
+- In `mailbox.listen(...)`, `address` is the matched recipient projection that
+  activated that mailbox delivery.
 
 ## `Suffix`
 
