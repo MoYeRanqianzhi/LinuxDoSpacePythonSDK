@@ -106,10 +106,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" release-artifacts/* --clobber
+          if gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" release-artifacts/* --clobber --repo "${GH_REPO}"
           else
-            gh release create "${RELEASE_TAG}" release-artifacts/* --generate-notes --title "${RELEASE_TAG}"
+            gh release create "${RELEASE_TAG}" release-artifacts/* --generate-notes --title "${RELEASE_TAG}" --repo "${GH_REPO}"
           fi
