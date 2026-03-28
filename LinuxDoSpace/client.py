@@ -6,8 +6,9 @@ The SDK keeps one strict runtime architecture:
 - the client parses every received mail event exactly once
 - the client fans parsed messages out to local mailbox bindings in memory
 
-This means the backend only knows about the API token. It does not need to know
-which exact mailboxes or regex rules the local process subscribed to.
+This means the backend only knows about the API token plus the currently active
+dynamic `-mail<suffix>` filter set. Exact mailbox prefixes and regex rules
+still remain local to the SDK process.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from email.policy import default as default_email_policy
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any, Callable, Iterator
 
-from .enums import Suffix
+from .enums import SemanticSuffix, Suffix
 from .exceptions import AuthenticationError, LinuxDoSpaceError, StreamError
 from .models import MailMessage
 
@@ -38,6 +39,7 @@ _DEFAULT_BASE_URL = "https://api.linuxdo.space"
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_STREAM_SOCKET_TIMEOUT_SECONDS = 30.0
 _STREAM_PATH = "/v1/token/email/stream"
+_STREAM_FILTERS_PATH = "/v1/token/email/filters"
 _READY_EVENT_TYPE = "ready"
 _HEARTBEAT_EVENT_TYPE = "heartbeat"
 _MAIL_EVENT_TYPE = "mail"
@@ -150,7 +152,7 @@ class MailBindingSpec:
     first and register it in one explicit step with `client.mail.bind_many(...)`.
     """
 
-    suffix: Suffix | str
+    suffix: Suffix | SemanticSuffix | str
     prefix: str | None = None
     pattern: str | re.Pattern[str] | None = None
     allow_overlap: bool = False
@@ -196,6 +198,7 @@ class Client:
         self._all_listeners: list[queue.Queue[object]] = []
         self._mail_bindings_by_suffix: dict[str, list[_MailBinding]] = {}
         self._owner_username: str | None = None
+        self._synced_mailbox_suffix_fragments: tuple[str, ...] | None = None
 
         self._initial_connect_event = threading.Event()
         self._initial_connect_error: LinuxDoSpaceError | None = None
@@ -279,7 +282,7 @@ class Client:
         *,
         prefix: str | None = None,
         pattern: str | re.Pattern[str] | None = None,
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> "MailBox":
         """Create one mailbox binding on top of the shared client stream.
@@ -310,7 +313,7 @@ class Client:
         *,
         prefix: str | None = None,
         pattern: str | re.Pattern[str] | None = None,
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> dict[str, Any]:
         """Validate and normalize one mailbox binding without registering it."""
@@ -341,12 +344,15 @@ class Client:
             "compiled_pattern": _compile_pattern(pattern),
         }
 
-    def _resolve_binding_suffix(self, suffix: Suffix | str) -> str:
+    def _resolve_binding_suffix(self, suffix: Suffix | SemanticSuffix | str) -> str:
         """Resolve one public suffix input into the concrete mailbox suffix.
 
         `Suffix.linuxdo_space` is intentionally semantic rather than literal:
-        it maps to the current token owner's namespace suffix
-        `<username>.linuxdo.space`.
+        it maps to the current token owner's dedicated mail namespace suffix
+        `<username>-mail.linuxdo.space`.
+
+        `Suffix.linuxdo_space.with_suffix("foo")` derives the live dynamic
+        mailbox namespace `<username>-mailfoo.linuxdo.space`.
 
         Plain strings remain literal mailbox suffixes for callers who need
         direct control over the exact routed domain.
@@ -358,7 +364,15 @@ class Client:
                 raise StreamError(
                     "stream bootstrap did not provide owner_username required to resolve Suffix.linuxdo_space"
                 )
-            return f"{owner_username}.{suffix.value}".strip().lower()
+            return f"{owner_username}-mail.{suffix.value}".strip().lower()
+
+        if isinstance(suffix, SemanticSuffix) and suffix.base is Suffix.linuxdo_space:
+            owner_username = (self._owner_username or "").strip().lower()
+            if not owner_username:
+                raise StreamError(
+                    "stream bootstrap did not provide owner_username required to resolve Suffix.linuxdo_space.with_suffix(...)"
+                )
+            return f"{owner_username}-mail{suffix.mail_suffix_fragment}.{suffix.base.value}".strip().lower()
 
         normalized_suffix = str(suffix).strip().lower()
         if not normalized_suffix:
@@ -382,7 +396,7 @@ class Client:
         self,
         *,
         pattern: str | re.Pattern[str] = r".*",
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> "MailBox":
         """Create one catch-all helper based on regex mailbox matching.
@@ -532,8 +546,17 @@ class Client:
         if not local_part or at_sign != "@":
             return []
 
+        normalized_suffix = suffix.strip().lower()
         with self._listeners_lock:
-            bindings = list(self._mail_bindings_by_suffix.get(suffix, []))
+            bindings = list(self._mail_bindings_by_suffix.get(normalized_suffix, []))
+            if not bindings:
+                owner_username = (self._owner_username or "").strip().lower()
+                if owner_username:
+                    root_suffix = Suffix.linuxdo_space.value
+                    semantic_legacy_suffix = f"{owner_username}.{root_suffix}"
+                    semantic_mail_suffix = f"{owner_username}-mail.{root_suffix}"
+                    if normalized_suffix == semantic_legacy_suffix:
+                        bindings = list(self._mail_bindings_by_suffix.get(semantic_mail_suffix, []))
 
         matched_bindings: list[_MailBinding] = []
         for binding in bindings:
@@ -615,6 +638,16 @@ class Client:
 
         with self._listeners_lock:
             self._mail_bindings_by_suffix.setdefault(suffix, []).append(binding)
+        try:
+            self._sync_remote_mailbox_filters(strict=True)
+        except Exception:
+            with self._listeners_lock:
+                bindings = self._mail_bindings_by_suffix.get(suffix)
+                if bindings is not None:
+                    bindings[:] = [item for item in bindings if item is not binding]
+                    if not bindings:
+                        self._mail_bindings_by_suffix.pop(suffix, None)
+            raise
 
         def _unregister() -> None:
             with self._listeners_lock:
@@ -624,8 +657,70 @@ class Client:
                 bindings[:] = [item for item in bindings if item is not binding]
                 if not bindings:
                     self._mail_bindings_by_suffix.pop(suffix, None)
+            self._sync_remote_mailbox_filters(strict=False)
 
         return _unregister
+
+    def _sync_remote_mailbox_filters(self, *, strict: bool) -> None:
+        """Synchronize active dynamic mail suffix fragments to the backend."""
+
+        if self._closed:
+            return
+        owner_username = (self._owner_username or "").strip().lower()
+        if owner_username == "":
+            return
+
+        fragments = self._collect_remote_mailbox_suffix_fragments(owner_username)
+        if fragments == () and self._synced_mailbox_suffix_fragments is None:
+            return
+        if self._synced_mailbox_suffix_fragments == fragments:
+            return
+
+        request = urllib.request.Request(
+            url=f"{self._base_url}{_STREAM_FILTERS_PATH}",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "LinuxDoSpace Python SDK/0.3.0a2",
+            },
+            data=json.dumps({"suffixes": list(fragments)}).encode("utf-8"),
+            method="PUT",
+        )
+
+        try:
+            with self._urlopen(request, timeout=self._connect_timeout) as response:
+                status_code = getattr(response, "status", 200)
+                if status_code != 200:
+                    raise StreamError(f"unexpected mailbox filter sync status code: {status_code}")
+                response.read()
+        except Exception as exc:
+            if strict:
+                raise StreamError(f"failed to synchronize remote mailbox filters: {exc}") from exc
+            return
+
+        self._synced_mailbox_suffix_fragments = fragments
+
+    def _collect_remote_mailbox_suffix_fragments(self, owner_username: str) -> tuple[str, ...]:
+        """Return the active owner-specific `-mail` suffix fragments."""
+
+        canonical_prefix = f"{owner_username}-mail"
+        root_suffix = Suffix.linuxdo_space.value
+        fragments: set[str] = set()
+
+        with self._listeners_lock:
+            suffixes = list(self._mail_bindings_by_suffix.keys())
+
+        for suffix in suffixes:
+            normalized_suffix = suffix.strip().lower()
+            if not normalized_suffix.endswith("." + root_suffix):
+                continue
+            label = normalized_suffix[: -(len(root_suffix) + 1)]
+            if "." in label or not label.startswith(canonical_prefix):
+                continue
+            fragments.add(label[len(canonical_prefix) :])
+
+        return tuple(sorted(fragments))
 
     def _snapshot_registered_mailboxes(self) -> list["MailBox"]:
         """Return a unique snapshot of currently registered mailbox objects."""
@@ -915,7 +1010,7 @@ class MailBindingFacade:
         *,
         prefix: str | None = None,
         pattern: str | re.Pattern[str] | None = None,
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> MailBox:
         """Register one mailbox binding explicitly.
@@ -942,7 +1037,7 @@ class MailBindingFacade:
         *,
         prefix: str | None = None,
         pattern: str | re.Pattern[str] | None = None,
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> MailBindingSpec:
         """Create one ordered mailbox-binding spec for later batch registration."""
@@ -992,7 +1087,7 @@ class MailBindingFacade:
         *,
         prefix: str | None = None,
         pattern: str | re.Pattern[str] | None = None,
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> MailBox:
         """Return the same mailbox binding as `bind(...)`.
@@ -1012,7 +1107,7 @@ class MailBindingFacade:
         self,
         *,
         pattern: str | re.Pattern[str] = r".*",
-        suffix: Suffix | str,
+        suffix: Suffix | SemanticSuffix | str,
         allow_overlap: bool = False,
     ) -> MailBox:
         """Build one regex-based catch-all mailbox helper explicitly."""

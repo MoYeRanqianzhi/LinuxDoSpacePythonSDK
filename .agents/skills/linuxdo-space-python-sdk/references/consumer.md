@@ -46,7 +46,10 @@ the SDK itself.
 - One `Client` opens one upstream HTTPS stream immediately.
 - `client.listen(...)` gives full-token intake.
 - `client.mail.bind(...)` creates local mailbox matching rules.
-- `Suffix.linuxdo_space` resolves to `<owner_username>.linuxdo.space`.
+- `Suffix.linuxdo_space` resolves to `<owner_username>-mail.<default-root>`, so mailbox addresses look like `prefix@<owner_username>-mail.<default-root>` in the current distribution.
+- `Suffix.linuxdo_space.with_suffix("foo")` resolves to `<owner_username>-mailfoo.<default-root>` and produces `prefix@<owner_username>-mailfoo.<default-root>` when extra suffix capacity is granted.
+- The SDK automatically syncs active dynamic `-mail<suffix>` filters to `/v1/token/email/filters`.
+- Legacy events might still mention `<owner_username>.linuxdo.space`, but that form is only kept for historical compatibility and should not be treated as the current binding target.
 - A mailbox starts receiving only while `mail.listen(...)` is active.
 - Positive `timeout` values on both `client.listen(...)` and `mail.listen(...)` mean total wall-clock time, not idle timeout.
 - `client.mail.route(message)` is a read-only helper for the current
@@ -76,6 +79,19 @@ with Client(token="...") as client:
     with client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space) as mailbox:
         for item in mailbox.listen(timeout=60):
             print(item.subject)
+```
+
+### Dynamic Mail Suffix
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="...") as client:
+    with client.mail.bind(
+        prefix="alice",
+        suffix=Suffix.linuxdo_space.with_suffix("foo"),
+    ) as mailbox:
+        print(mailbox.address)  # alice@<owner_username>-mailfoo.<default-root>
 ```
 
 ### Regex Mailbox Binding

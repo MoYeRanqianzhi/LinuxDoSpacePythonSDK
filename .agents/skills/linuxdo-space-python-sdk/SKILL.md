@@ -25,7 +25,10 @@ Read [references/development.md](references/development.md) only when editing th
    - remote `base_url` must use `https://`; only localhost may use `http://`
    - `client.listen(...)` is the canonical full-intake interface
    - positive `timeout` values on both `client.listen(...)` and `mail.listen(...)` mean total wall-clock time for that iterator, not idle timeout
-   - `Suffix.linuxdo_space` is semantic and resolves to `<owner_username>.linuxdo.space`
+   - `Suffix.linuxdo_space` is semantic and resolves to `<owner_username>-mail.<default-root>`, so mailbox addresses look like `prefix@<owner_username>-mail.<default-root>` in the live distribution.
+   - `Suffix.linuxdo_space.with_suffix("foo")` resolves to `<owner_username>-mailfoo.<default-root>` and yields addresses such as `prefix@<owner_username>-mailfoo.<default-root>` when suffix extensions are needed.
+   - Legacy events might still surface `<owner_username>.linuxdo.space`, but that form is only kept for historical compatibility and should not be treated as the current binding target.
+   - the SDK auto-syncs active dynamic `-mail<suffix>` filters to `/v1/token/email/filters`
    - exact and regex bindings share one ordered matching chain per suffix
    - `allow_overlap=False` stops at the first match; `allow_overlap=True` continues
    - `bind(...)` registers matching metadata immediately

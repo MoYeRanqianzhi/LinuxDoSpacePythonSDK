@@ -35,7 +35,10 @@ except LinuxDoSpaceError:
     ...
 ```
 
-`Suffix.linuxdo_space` 在运行时会被解析成 `<owner_username>.linuxdo.space`。
+`Suffix.linuxdo_space` 在运行时会被解析成 `<owner_username>-mail.<default-root>`，使得绑定地址呈现 `prefix@<owner_username>-mail.<default-root>` 的形式。
+`Suffix.linuxdo_space.with_suffix("foo")` 解析成 `<owner_username>-mailfoo.<default-root>`，用于生成 `prefix@<owner_username>-mailfoo.<default-root>` 之类的地址。
+SDK 会自动同步所有活动的动态 `-mail<suffix>` 过滤设置到 `/v1/token/email/filters`。
+旧事件或旧配置可能仍然保留 `<owner_username>.linuxdo.space` 的格式，但那仅用于历史兼容，不能作为当前主语义。
 
 ## 2. Add or Change a Public API
 

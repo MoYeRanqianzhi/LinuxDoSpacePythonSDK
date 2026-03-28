@@ -63,6 +63,66 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         mailbox = client.mail.bind(prefix="alice", suffix="linuxdo.space")
         self.assertEqual(mailbox.address, "alice@linuxdo.space")
 
+    def test_semantic_suffix_uses_mail_namespace_by_default(self) -> None:
+        """The semantic suffix should now expose the owner's canonical mail namespace."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.assertEqual(mailbox.address, "alice@testuser-mail.linuxdo.space")
+
+    def test_semantic_suffix_with_dynamic_fragment_registers_remote_filter(self) -> None:
+        """Binding one dynamic semantic mail suffix should sync it to the backend."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space.with_suffix("foo"))
+        self.assertEqual(mailbox.address, "alice@testuser-mailfoo.linuxdo.space")
+        self.assertTrue(
+            server.wait_for_filter_suffixes(("foo",), timeout=2.0),
+            f"expected synced suffix fragments ('foo',), got {server.latest_filter_suffixes}",
+        )
+
+        collected: list[str] = []
+
+        def _consume() -> None:
+            for item in mailbox.listen(timeout=0.4):
+                collected.append(item.address)
+
+        listener = threading.Thread(target=_consume)
+        listener.start()
+        _wait_for(lambda: mailbox._is_listening, timeout=2.0, description="dynamic suffix mailbox listener")
+
+        server.publish_mail(
+            "alice@testuser-mailfoo.linuxdo.space",
+            _raw_message("alice@testuser-mailfoo.linuxdo.space", "Dynamic Foo", "body"),
+        )
+
+        listener.join(timeout=2.0)
+        self.assertEqual(collected, ["alice@testuser-mailfoo.linuxdo.space"])
+
+        mailbox.close()
+        self.assertTrue(
+            server.wait_for_filter_suffixes((), timeout=2.0),
+            f"expected suffix fragments to be cleared after close, got {server.latest_filter_suffixes}",
+        )
+
     def test_client_listen_receives_all_messages(self) -> None:
         """The full client-level listener should expose every message received by the token."""
 
@@ -210,6 +270,25 @@ class LinuxDoSpaceSDKTests(unittest.TestCase):
         client.mail.unbind(mailbox)
         self.assertEqual(client.mail.route(probe_message), ())
         self.assertTrue(mailbox.closed)
+
+    def test_semantic_suffix_also_matches_mail_namespace(self) -> None:
+        """The original semantic suffix should transparently match the current mail namespace."""
+
+        server, thread = _start_stream_server()
+        self.addCleanup(_cleanup_stream_server, server, thread)
+
+        client = Client(
+            token="lds_pat.tok123.supersecret",
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            stream_socket_timeout=0.2,
+        )
+        self.addCleanup(client.close)
+
+        mailbox = client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
+        self.addCleanup(mailbox.close)
+
+        matched = client.mail.route(_sdk_message("alice@testuser-mail.linuxdo.space"))
+        self.assertEqual(matched, (mailbox,))
 
     def test_bind_many_registers_one_ordered_group(self) -> None:
         """Batch registration should preserve caller order exactly."""
@@ -777,6 +856,35 @@ class _StreamingRequestHandler(BaseHTTPRequestHandler):
         finally:
             self.server.unregister_subscriber(self.wfile)
 
+    def do_PUT(self) -> None:  # noqa: N802
+        if self.path != "/v1/token/email/filters":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        payload = json.loads(raw_body.decode("utf-8"))
+        suffixes = payload.get("suffixes", [])
+        self.server.record_filter_update(tuple(str(item) for item in suffixes))
+
+        response = json.dumps(
+            {
+                "suffixes": list(suffixes),
+                "domains": [
+                    f"{TEST_OWNER_USERNAME}-mail{str(item)}.linuxdo.space"
+                    for item in suffixes
+                ],
+            }
+        ).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+        self.wfile.flush()
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         """Silence test-server request logs."""
 
@@ -795,6 +903,8 @@ class _ThreadingTestHTTPServer(ThreadingHTTPServer):
         self._subscribers_lock = threading.Lock()
         self._request_count = 0
         self._request_count_lock = threading.Lock()
+        self._latest_filter_suffixes: tuple[str, ...] = ()
+        self._filter_lock = threading.Lock()
 
     @property
     def request_count(self) -> int:
@@ -841,6 +951,31 @@ class _ThreadingTestHTTPServer(ThreadingHTTPServer):
 
         with self._subscribers_lock:
             self._subscribers = [item for item in self._subscribers if item is not writer]
+
+    @property
+    def latest_filter_suffixes(self) -> tuple[str, ...]:
+        """Return the latest suffix fragment set synced by the SDK."""
+
+        with self._filter_lock:
+            return self._latest_filter_suffixes
+
+    def record_filter_update(self, suffixes: tuple[str, ...]) -> None:
+        """Persist the latest filter-sync payload observed by the test server."""
+
+        with self._filter_lock:
+            self._latest_filter_suffixes = tuple(sorted(suffixes))
+
+    def wait_for_filter_suffixes(self, expected_suffixes: tuple[str, ...], timeout: float) -> bool:
+        """Wait until the SDK synced the expected suffix-fragment set."""
+
+        expected = tuple(sorted(expected_suffixes))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._filter_lock:
+                if self._latest_filter_suffixes == expected:
+                    return True
+            time.sleep(0.01)
+        return False
 
     def publish_mail(self, recipient: str, raw_message: bytes) -> None:
         """Push one mail event to every currently connected client stream."""

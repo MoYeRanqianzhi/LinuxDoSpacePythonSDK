@@ -27,6 +27,7 @@ from LinuxDoSpace import (
     MailBindingSpec,
     MailBox,
     MailMessage,
+    SemanticSuffix,
     StreamError,
     Suffix,
 )
@@ -36,7 +37,7 @@ from LinuxDoSpace import (
 
 - One `Client` owns exactly one upstream HTTPS stream.
 - The upstream stream is opened immediately during `Client(...)` construction.
-- The backend only knows about the API token, not local mailbox bindings.
+- The backend knows about the API token and the active dynamic `-mail<suffix>` filter set, but not local prefix/regex matching rules.
 - Full-token intake happens through `client.listen(...)`.
 - Local mailbox filtering happens in-process inside the Python client.
 
@@ -144,7 +145,7 @@ Rules:
 - `prefix` is normalized to lowercase and trimmed.
 - `pattern` accepts `str` or compiled `re.Pattern[str]`.
 - Regex matching uses `fullmatch()`, not `search()`.
-- `suffix` accepts either `Suffix` or `str`.
+- `suffix` accepts `Suffix`, `SemanticSuffix`, or `str`.
 - Matching metadata is registered immediately at bind time.
 - Local message buffering does not start until `mailbox.listen(...)`.
 
@@ -230,7 +231,7 @@ client.mail.bind(pattern=r".*", suffix=Suffix.linuxdo_space, allow_overlap=True)
 client.mail.bind(prefix="alice", suffix=Suffix.linuxdo_space)
 ```
 
-- `alice@<owner_username>.linuxdo.space` matches both bindings, in that order.
+- `alice@<owner_username>-mail.<default-root>` matches both bindings, in that order.
 
 ## `MailBox`
 
@@ -356,9 +357,12 @@ Suffix.linuxdo_space
 
 It is a semantic first-party suffix enum.
 
-- `str(Suffix.linuxdo_space) == "linuxdo.space"` remains true
-- mailbox binding resolution expands it to `<owner_username>.linuxdo.space`
-- plain `str` suffix inputs still stay literal
+ - `str(Suffix.linuxdo_space) == "linuxdo.space"` remains true
+ - `Suffix.linuxdo_space` resolves to `<owner_username>-mail.<default-root>`, so mailbox bindings emit addresses like `prefix@<owner_username>-mail.<default-root>` in the live distribution.
+ - `Suffix.linuxdo_space.with_suffix("foo")` expands to `<owner_username>-mailfoo.<default-root>` for suffix extensions, yielding addresses such as `prefix@<owner_username>-mailfoo.<default-root>`.
+ - plain `str` suffix inputs still stay literal
+ - the SDK automatically syncs active dynamic `-mail<suffix>` filters to `/v1/token/email/filters`.
+ - legacy events may still surface `<owner_username>.linuxdo.space`, but that form only exists for backwards compatibility and is not the live binding target.
 
 ## Exceptions
 

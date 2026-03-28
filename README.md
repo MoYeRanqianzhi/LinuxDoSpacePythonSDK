@@ -33,7 +33,12 @@ python -m pip install -e .
 关于 `Suffix.linuxdo_space`：
 
 - 它是语义后缀，不是字面父域名
-- SDK 会在 `ready.owner_username` 到达后，把它解析成 `<owner_username>.linuxdo.space`
+- SDK 会在内部把它解析到当前 token 拥有者在 `linuxdo.space` 下的第一方邮件命名空间
+- 当前至少自动兼容：
+  - `<owner_username>-mail.linuxdo.space`
+  - `<owner_username>-mail<suffix_fragment>.linuxdo.space`
+- `Suffix.linuxdo_space` 当前默认表示 `<owner_username>-mail.linuxdo.space`
+- `Suffix.linuxdo_space.with_suffix("foo")` 表示 `<owner_username>-mailfoo.linuxdo.space`
 - 如果你需要字面自定义后缀，请直接传普通字符串
 
 ```python
@@ -77,6 +82,25 @@ with Client(token="你的 API Token") as client:
             print(item.subject)
             print(item.text)
 ```
+
+如果你要使用一个额外的动态 mail suffix：
+
+```python
+from LinuxDoSpace import Client, Suffix
+
+with Client(token="你的 API Token") as client:
+    with client.mail.bind(
+        prefix="alice",
+        suffix=Suffix.linuxdo_space.with_suffix("foo"),
+    ) as mail:
+        print(mail.address)  # alice@<owner_username>-mailfoo.linuxdo.space
+        for item in mail.listen(timeout=60):
+            print(item.address)
+            print(item.subject)
+```
+
+这里不需要你自己拼出真实域名。SDK 会自动把当前活跃的动态 suffix
+同步回后端，后端只接受当前连接实际注册过的 `-mail<suffix>` 域。
 
 如果你要一次性注册多条绑定，可以显式批量注册：
 
@@ -208,7 +232,9 @@ except LinuxDoSpaceError as exc:
 - `client.listen(...)` 每次返回一条上游事件投影，`message.address` 是当前投影地址，`message.recipients` 保留完整原始收件人列表
 - `mail.listen(...)` 每次返回一条命中 mailbox 的收件地址投影，因此它看到的 `message.address` 可以和全量流视角不同
 - `client.mail(...)` 只是 `client.mail.bind(...)` 的语法糖
-- `Suffix.linuxdo_space` 会解析成 `<owner_username>.linuxdo.space`
+- `Suffix.linuxdo_space` 当前会解析成当前用户的基础 mail 命名空间 `<owner_username>-mail.linuxdo.space`
+- `Suffix.linuxdo_space.with_suffix("foo")` 会解析成 `<owner_username>-mailfoo.linuxdo.space`
+- SDK 会自动把活跃的动态 `-mail<suffix>` 过滤列表同步到 `/v1/token/email/filters`
 - SDK 会忽略 `ready` 与 `heartbeat` 事件，只向你暴露真正的邮件事件
 - 如果 `timeout` 为正数，则表示本次监听的最长总时长（秒）
 - 返回对象会尽量把常用信息都变成属性，方便 IDE 自动补全
@@ -236,8 +262,8 @@ except LinuxDoSpaceError as exc:
 
 示例：
 
-- 如果先创建 `pattern=r".*"`，后创建 `prefix="alice"`，而第一个绑定没有开启 `allow_overlap`
-  那么 `alice@<owner_username>.linuxdo.space` 会先命中 `.*`，并在那里停止，后面的精确绑定不会收到
+- 如果先创建 `pattern=r".*"`, 后创建 `prefix="alice"`，而第一个绑定没有开启 `allow_overlap`
+  那么 `alice@<owner_username>.linuxdo.space` 或 `alice@<owner_username>-mail.linuxdo.space` 都会先命中 `.*`，并在那里停止，后面的精确绑定不会收到
 - 如果先创建 `pattern=r".*"`, 且它设置了 `allow_overlap=True`
   后面创建的 `prefix="alice"` 也能继续收到
 
